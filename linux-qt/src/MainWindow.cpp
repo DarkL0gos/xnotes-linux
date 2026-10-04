@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "CanvasWidget.h"
+#include "Icons.h"
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
 #include "PdfExport.h"
@@ -39,17 +40,18 @@ struct ToolEntry {
     const char* id;
     const char* label;
     const char* key;
+    const char* icon;
 };
 
 const ToolEntry kTools[] = {
-    {"pan", "Рука", "1"},
-    {"pen", "Перо", "2"},
-    {"highlighter", "Маркер", "3"},
-    {"eraser", "Ластик", "4"},
-    {"lasso", "Лассо", "5"},
-    {"select", "Выделение", "6"},
-    {"shape", "Фигура", "7"},
-    {"text_box", "Текст", "8"},
+    {"pan", "Рука", "1", "pan"},
+    {"pen", "Перо", "2", "ic_stroke_regular"},
+    {"highlighter", "Маркер", "3", "ic_stroke_highlighter"},
+    {"eraser", "Ластик", "4", "eraser"},
+    {"lasso", "Лассо", "5", "lasso"},
+    {"select", "Выделение", "6", "select"},
+    {"shape", "Фигура", "7", "shape"},
+    {"text_box", "Текст", "8", "textBox"},
 };
 
 struct FaceEntry {
@@ -62,11 +64,12 @@ const FaceEntry kFaces[] = {{"mono", "Моноширинный"}, {"sans", "Бе
 struct ShapeEntry {
     const char* id;
     const char* label;
+    const char* icon;
 };
 
 const ShapeEntry kShapes[] = {
-    {"line", "Линия"}, {"arrow", "Стрелка"}, {"rectangle", "Прямоугольник"},
-    {"ellipse", "Эллипс"}, {"circle", "Круг"}, {"triangle", "Треугольник"},
+    {"line", "Линия", "shapeLine"}, {"arrow", "Стрелка", "shapeArrow"}, {"rectangle", "Прямоугольник", "shapeRect"},
+    {"ellipse", "Эллипс", "shapeEllipse"}, {"circle", "Круг", "shapeCircle"}, {"triangle", "Треугольник", "shapeTriangle"},
 };
 
 /* The app's ink presets (InkPalette) plus black and blue for light paper. */
@@ -149,10 +152,12 @@ void MainWindow::buildUi() {
     bar->setMovable(false);
     auto* create = new QToolButton(this);
     create->setText(QStringLiteral("Создать"));
+    create->setIcon(xnIcon(QStringLiteral("file")));
+    create->setToolTip(QStringLiteral("Создать"));
     create->setPopupMode(QToolButton::InstantPopup);
     auto* createMenu = new QMenu(create);
-    createMenu->addAction(QStringLiteral("Заметку"), QKeySequence::New, this, [this] { if (confirmDiscard()) newNote(); });
-    createMenu->addAction(QStringLiteral("Холст"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N), this, [this] { if (confirmDiscard()) newCanvas(); });
+    createMenu->addAction(xnIcon(QStringLiteral("file")), QStringLiteral("Заметку"), QKeySequence::New, this, [this] { if (confirmDiscard()) newNote(); });
+    createMenu->addAction(xnIcon(QStringLiteral("canvas")), QStringLiteral("Холст"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N), this, [this] { if (confirmDiscard()) newCanvas(); });
     create->setMenu(createMenu);
     bar->addWidget(create);
     bar->addAction(QStringLiteral("Открыть…"), QKeySequence::Open, this, &MainWindow::chooseOpen);
@@ -220,13 +225,14 @@ void MainWindow::buildUi() {
         a->setShortcut(QKeySequence(QString::fromLatin1(t.key)));
         a->setData(QByteArray(t.id));
         tools_->addAction(a);
+        a->setIcon(xnIcon(QString::fromLatin1(t.icon)));
         if (qstrcmp(t.id, "pen") == 0) a->setChecked(true);
         if (qstrcmp(t.id, "shape") == 0) {
             // The shape tool's button also opens what it draws.
             auto* menu = new QMenu(this);
             auto* kinds = new QActionGroup(menu);
             for (const ShapeEntry& k : kShapes) {
-                QAction* ka = menu->addAction(QString::fromUtf8(k.label));
+                QAction* ka = menu->addAction(xnIcon(QString::fromLatin1(k.icon)), QString::fromUtf8(k.label));
                 ka->setCheckable(true);
                 ka->setChecked(shapeKind_ == k.id);
                 kinds->addAction(ka);
@@ -308,6 +314,42 @@ void MainWindow::buildUi() {
     tools->addSeparator();
     tools->addAction(QStringLiteral("Картинка…"), this, &MainWindow::chooseImage);
     colorAction_->setToolTip(QStringLiteral("Текущий цвет; нажмите, чтобы выбрать другой"));
+
+    // Icons from the Android app's set; the words stay as tooltips (and as the actions' names).
+    const QHash<QString, QString> icons = {
+        {QStringLiteral("Открыть…"), QStringLiteral("folder")},
+        {QStringLiteral("Сохранить"), QStringLiteral("save")},
+        {QStringLiteral("Сохранить как…"), QStringLiteral("download")},
+        {QStringLiteral("Экспорт в PDF…"), QStringLiteral("exportDoc")},
+        {QStringLiteral("↶"), QStringLiteral("undo")},
+        {QStringLiteral("↷"), QStringLiteral("redo")},
+        {QStringLiteral("←"), QStringLiteral("prev")},
+        {QStringLiteral("→"), QStringLiteral("next")},
+        {QStringLiteral("−"), QStringLiteral("zoomOut")},
+        {QStringLiteral("+"), QStringLiteral("zoomIn")},
+        {QStringLiteral("По ширине"), QStringLiteral("fit")},
+        {QStringLiteral("+ Страница"), QStringLiteral("plus")},
+        {QStringLiteral("− Страница"), QStringLiteral("minus")},
+        {QStringLiteral("Фон…"), QStringLiteral("sliders")},
+        {QStringLiteral("Тёмная"), QStringLiteral("view")},
+        {QStringLiteral("Картинка…"), QStringLiteral("image")},
+    };
+    const QHash<QString, QString> tips = {
+        {QStringLiteral("↶"), QStringLiteral("Отменить")}, {QStringLiteral("↷"), QStringLiteral("Повторить")},
+        {QStringLiteral("←"), QStringLiteral("Предыдущая страница")}, {QStringLiteral("→"), QStringLiteral("Следующая страница")},
+        {QStringLiteral("−"), QStringLiteral("Уменьшить")}, {QStringLiteral("+"), QStringLiteral("Увеличить")},
+        {QStringLiteral("+ Страница"), QStringLiteral("Добавить страницу")}, {QStringLiteral("− Страница"), QStringLiteral("Удалить страницу")},
+        {QStringLiteral("Тёмная"), QStringLiteral("Тёмная бумага")},
+    };
+    for (QToolBar* tb : {bar, tools}) {
+        tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        tb->setIconSize(QSize(22, 22));
+        for (QAction* a : tb->actions()) {
+            if (auto it = icons.constFind(a->text()); it != icons.constEnd()) a->setIcon(xnIcon(*it));
+            const QString tip = tips.value(a->text(), a->text());
+            a->setToolTip(a->shortcut().isEmpty() ? tip : QStringLiteral("%1 (%2)").arg(tip, a->shortcut().toString(QKeySequence::NativeText)));
+        }
+    }
 
     selectionBar_ = new SelectionBar(canvas_);
     selectionBar_->setSwatches(kSwatches);
@@ -457,11 +499,11 @@ void MainWindow::showContextMenu(QPointF at, bool onLocked) {
     auto* e = canvas_->editor();
     if (!e) return;
     QMenu menu(this);
-    QAction* paste = menu.addAction(QStringLiteral("Вставить"), this, [this, at] { pasteAt(at); });
+    QAction* paste = menu.addAction(xnIcon(QStringLiteral("paste")), QStringLiteral("Вставить"), this, [this, at] { pasteAt(at); });
     const QMimeData* mime = QApplication::clipboard()->mimeData();
     paste->setEnabled(xn_editor_can_paste(e) || (mime && mime->hasImage()));
-    if (onLocked) menu.addAction(QStringLiteral("Открепить"), this, [e] { xn_editor_unlock_pressed(e); });
-    menu.addAction(QStringLiteral("Выделить всё"), this, &MainWindow::selectAll);
+    if (onLocked) menu.addAction(xnIcon(QStringLiteral("unlock")), QStringLiteral("Открепить"), this, [e] { xn_editor_unlock_pressed(e); });
+    menu.addAction(xnIcon(QStringLiteral("select")), QStringLiteral("Выделить всё"), this, &MainWindow::selectAll);
     menu.exec(canvas_->mapToGlobal(at.toPoint()));
 }
 
@@ -494,6 +536,7 @@ void MainWindow::applyKind() {
     for (QAction* a : std::as_const(pageActions_)) a->setVisible(!canvas);
     exportAction_->setEnabled(!canvas);
     fitAction_->setText(canvas ? QStringLiteral("Показать всё") : QStringLiteral("По ширине"));
+    fitAction_->setToolTip(fitAction_->text());
     for (QAction* a : tools_->actions()) {
         if (a->data().toByteArray() != "text_box") continue;
         a->setVisible(!canvas);

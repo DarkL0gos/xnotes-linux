@@ -1,6 +1,7 @@
 #include "SelectionBar.h"
 
 #include "CanvasWidget.h"
+#include "Icons.h"
 
 #include <QColorDialog>
 #include <QGridLayout>
@@ -38,8 +39,10 @@ namespace {
 
 QToolButton* actionButton(QWidget* parent, const char* icon, const QString& text, std::function<void()> fn) {
     auto* b = new QToolButton(parent);
-    const QIcon themed = QIcon::fromTheme(QString::fromLatin1(icon));
-    if (themed.isNull()) b->setText(text); else b->setIcon(themed);
+    b->setIcon(xnIcon(QString::fromLatin1(icon)));
+    b->setIconSize(QSize(20, 20));
+    b->setText(text);
+    b->setToolButtonStyle(Qt::ToolButtonIconOnly);
     b->setToolTip(text);
     b->setAutoRaise(true);
     b->setFocusPolicy(Qt::NoFocus);
@@ -57,20 +60,23 @@ SelectionBar::SelectionBar(CanvasWidget* canvas) : QFrame(canvas), canvas_(canva
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(4, 2, 4, 2);
     row->setSpacing(0);
-    row->addWidget(actionButton(this, "edit-delete", QStringLiteral("Удалить"), [this] { if (auto* e = editor()) xn_editor_delete_selection(e); }));
-    row->addWidget(actionButton(this, "edit-cut", QStringLiteral("Вырезать"), [this] { if (auto* e = editor()) xn_editor_cut(e); }));
-    row->addWidget(actionButton(this, "edit-copy", QStringLiteral("Копировать"), [this] { if (auto* e = editor()) xn_editor_copy(e); }));
-    row->addWidget(actionButton(this, "go-top", QStringLiteral("На передний план"), [this] { if (auto* e = editor()) xn_editor_bring_to_front(e); }));
-    row->addWidget(actionButton(this, "edit-duplicate", QStringLiteral("Дублировать"), [this] { if (auto* e = editor()) xn_editor_duplicate(e); }));
+    row->addWidget(actionButton(this, "trash", QStringLiteral("Удалить"), [this] { if (auto* e = editor()) xn_editor_delete_selection(e); }));
+    row->addWidget(actionButton(this, "cut", QStringLiteral("Вырезать"), [this] { if (auto* e = editor()) xn_editor_cut(e); }));
+    row->addWidget(actionButton(this, "copy", QStringLiteral("Копировать"), [this] { if (auto* e = editor()) xn_editor_copy(e); }));
+    row->addWidget(actionButton(this, "front", QStringLiteral("На передний план"), [this] { if (auto* e = editor()) xn_editor_bring_to_front(e); }));
+    row->addWidget(actionButton(this, "duplicate", QStringLiteral("Дублировать"), [this] { if (auto* e = editor()) xn_editor_duplicate(e); }));
     auto* more = new QToolButton(this);
-    more->setText(QStringLiteral("⋯"));
+    more->setIcon(xnIcon(QStringLiteral("more")));
+    more->setText(QStringLiteral("Ещё"));
+    more->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    more->setIconSize(QSize(20, 20));
     more->setToolTip(QStringLiteral("Ещё"));
     more->setAutoRaise(true);
     more->setFocusPolicy(Qt::NoFocus);
     more->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(more);
-    QAction* style = menu->addAction(QStringLiteral("Изменить стиль…"), this, &SelectionBar::showStyle);
-    menu->addAction(QStringLiteral("Закрепить"), this, [this] { if (auto* e = editor()) xn_editor_lock_selection(e); });
+    QAction* style = menu->addAction(xnIcon(QStringLiteral("sliders")), QStringLiteral("Изменить стиль…"), this, &SelectionBar::showStyle);
+    menu->addAction(xnIcon(QStringLiteral("lock")), QStringLiteral("Закрепить"), this, [this] { if (auto* e = editor()) xn_editor_lock_selection(e); });
     connect(menu, &QMenu::aboutToShow, this, [this, style] {
         style->setEnabled(editor() && xn_editor_selection_style(editor(), nullptr, nullptr) > 0);
     });

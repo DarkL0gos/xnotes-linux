@@ -8,6 +8,7 @@
 #include "MainWindow.h"
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
+#include "Icons.h"
 
 #include <QAbstractButton>
 #include <QComboBox>
@@ -941,6 +942,29 @@ private slots:
         line("highlighter", 0x2090f0ffu, 600);
         canvas.setNote(nullptr);
         xn_note_close(note);
+    }
+
+    /* The icons are built in, and every tool on the toolbar shows one. */
+    void icons() {
+        QVERIFY(QFile::exists(QStringLiteral(":/icons/eraser.svg")));
+        QVERIFY(QFile::exists(QStringLiteral(":/icons/ic_stroke_regular.svg")));
+        const QIcon eraser = xnIcon(QStringLiteral("eraser"), Qt::black);
+        QVERIFY(!eraser.isNull());
+        const QImage img = eraser.pixmap(48, 48).toImage();
+        int dark = 0;
+        for (int y = 0; y < img.height(); y++)
+            for (int x = 0; x < img.width(); x++) dark += qAlpha(img.pixel(x, y)) > 128;
+        QVERIFY2(dark > 50, "the eraser is drawn");
+        QVERIFY(xnIcon(QStringLiteral("no-such-icon")).isNull());
+
+        MainWindow window;
+        window.newNote();
+        for (const char* tool : {"Рука", "Перо", "Маркер", "Ластик", "Лассо", "Выделение", "Фигура", "Текст"}) {
+            QAction* found = nullptr;
+            for (QAction* a : window.findChildren<QAction*>())
+                if (a->text() == QString::fromUtf8(tool)) found = a;
+            QVERIFY2(found && !found->icon().isNull(), tool);
+        }
     }
 
     void eraserEndErases() {
