@@ -29,16 +29,12 @@ import kotlin.math.roundToInt
 /** Turns a loaded [PdfSource] into a paged note to annotate (spec 08 §5). */
 object PdfImporter {
     fun import(source: PdfSource, dpi: Int = PageSize.DEFAULT_DPI): Document {
-        val doc = Document(dpi = dpi)
-        doc.pdfFile = source.file
+        val sizes = ArrayList<Pair<Double, Double>>()
         for (i in 0 until source.pageCount) {
-            val (wPts, hPts) = source.pageSizePoints(i) ?: break
-            val w = wPts / 72.0 * dpi
-            val h = hPts / 72.0 * dpi
-            doc.pages.add(Page(w, h, pdfPage = i))
+            val (w, h) = source.pageSizePoints(i) ?: break
+            sizes.add(w.toDouble() to h.toDouble())
         }
-        if (doc.pages.isEmpty()) doc.pages.add(Page.blank(PageSize.A4, com.xnotes.core.model.Orientation.PORTRAIT, dpi))
-        return doc
+        return Document.fromPdf(source.file, sizes, dpi)
     }
 }
 

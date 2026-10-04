@@ -1,6 +1,8 @@
 #include "CoreHost.h"
 
 #include <QFontMetricsF>
+#include <QPdfDocument>
+#include <QPdfDocumentRenderOptions>
 #include <QImageReader>
 #include <QPainterPath>
 #include <QTextLayout>
@@ -41,9 +43,9 @@ void PainterTarget::saveLayer(const QRectF& bounds, double alpha, int blend) {
     device &= QRect(0, 0, parent->device()->width(), parent->device()->height());
     if (device.isEmpty()) device = QRect(0, 0, 1, 1);
     Layer layer;
-    layer.image = QImage(device.size(), QImage::Format_ARGB32_Premultiplied);
-    layer.image.fill(Qt::transparent);
-    layer.painter = std::make_unique<QPainter>(&layer.image);
+    layer.image = std::make_unique<QImage>(device.size(), QImage::Format_ARGB32_Premultiplied);
+    layer.image->fill(Qt::transparent);
+    layer.painter = std::make_unique<QPainter>(layer.image.get());
     layer.painter->setRenderHints(parent->renderHints());
     QTransform t = parent->transform();
     t *= QTransform::fromTranslate(-device.x(), -device.y());
@@ -73,7 +75,7 @@ void PainterTarget::restore() {
     parent->setCompositionMode(layer.blend == XN_BLEND_MULTIPLY ? QPainter::CompositionMode_Multiply
                                : layer.blend == XN_BLEND_SCREEN ? QPainter::CompositionMode_Screen
                                                                 : QPainter::CompositionMode_SourceOver);
-    parent->drawImage(layer.deviceRect.topLeft(), layer.image);
+    parent->drawImage(layer.deviceRect.topLeft(), *layer.image);
     parent->restore();
 }
 
@@ -335,10 +337,14 @@ CoreHost::CoreHost() {
     host_.context_menu = contextMenu;
     host_.tool_changed = toolChanged;
     host_.text_edit = textEdit;
+    host_.pdf_page_count = pdfPageCount;
+    host_.pdf_page_size = pdfPageSize;
+    host_.draw_pdf_page = drawPdfPage;
 }
 
 CoreHost::~CoreHost() {
     for (QTimer* t : std::as_const(timers_)) delete t;
+    qDeleteAll(pdfs_);
 }
 
 void* CoreHost::surfaceCreate(void* ctx, int w, int h, double) {
@@ -447,6 +453,53 @@ void CoreHost::contextMenu(void* ctx, double x, double y, int onLocked) {
 
 void CoreHost::textEdit(void* ctx, const xn_text_field* field) {
     if (H(ctx)->onTextEdit) H(ctx)->onTextEdit(field);
+}
+
+QPdfDocument* CoreHost::pdf(const char* path) {
+    const QString key = QString::fromUtf8(path);
+    if (QPdfDocument* doc = pdfs_.value(key)) return doc;
+    auto* doc = new QPdfDocument;
+    if (doc->load(key) != QPdfDocument::Error::None) {
+        delete doc;
+        return nullptr;
+    }
+    pdfs_.insert(key, doc);
+    return doc;
+}
+
+int CoreHost::pdfPageCount(void* ctx, const char* path) {
+    QPdfDocument* doc = H(ctx)->pdf(path);
+    return doc ? doc->pageCount() : -1;
+}
+
+int CoreHost::pdfPageSize(void* ctx, const char* path, int page, double* w, double* h) {
+    QPdfDocument* doc = H(ctx)->pdf(path);
+    if (!doc || page < 0 || page >= doc->pageCount()) return 0;
+    const QSizeF size = doc->pagePointSize(page);
+    if (size.isEmpty()) return 0;
+    *w = size.width();
+    *h = size.height();
+    return 1;
+}
+
+/* Renders just the requested pixels of the page at its full scale, then places them. */
+void CoreHost::drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
+                           int rw, int rh, double x, double y, double w, double h) {
+    QPdfDocument* doc = H(ctx)->pdf(path);
+    if (!doc || page < 0 || page >= doc->pageCount() || rw <= 0 || rh <= 0) return;
+    QPdfDocumentRenderOptions options;
+    options.setScaledSize(QSize(fullW, fullH));
+    options.setScaledClipRect(QRect(rx, ry, rw, rh));
+    options.setRenderFlags(QPdfDocumentRenderOptions::RenderFlag::Annotations);
+    const QImage image = doc->render(page, QSize(rw, rh), options);
+    if (image.isNull()) return;
+    QPainter* p = P(renderer);
+    p->save();
+    p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    // A PDF page is white paper; QtPdf leaves what it does not paint transparent.
+    p->fillRect(QRectF(x, y, w, h), Qt::white);
+    p->drawImage(QRectF(x, y, w, h), image);
+    p->restore();
 }
 
 void CoreHost::toolChanged(void* ctx, const char* toolId) {

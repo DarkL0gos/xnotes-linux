@@ -95,6 +95,8 @@ typedef struct {
     int frames_n;
     int menu_shown, menu_calls, context_calls;
     int text_open, text_calls;
+    int pdf_draws;
+    char pdf_path[1024];
     double text_x, text_font;
     char tool[32];
 } host_state;
@@ -200,6 +202,25 @@ static void h_text_edit(void* ctx, const xn_text_field* f) {
     }
 }
 
+/* "PDFs": any path ending in .pdf has 3 A4 pages. */
+static int is_pdf(const char* path) {
+    size_t n = strlen(path);
+    return n >= 4 && strcmp(path + n - 4, ".pdf") == 0;
+}
+static int p_count(void* ctx, const char* path) { return is_pdf(path) ? 3 : -1; }
+static int p_size(void* ctx, const char* path, int page, double* w, double* h) {
+    if (!is_pdf(path) || page < 0 || page >= 3) return 0;
+    *w = 595;
+    *h = 842;
+    return 1;
+}
+static void p_draw(void* ctx, void* r, const char* path, int page, int fw, int fh, int rx, int ry, int rw, int rh,
+                   double x, double y, double w, double h) {
+    host_state* hs = ctx;
+    if (fw > 0 && fh > 0 && rw > 0 && rh > 0 && rx + rw <= fw + 1 && ry + rh <= fh + 1 && w > 0 && h > 0) hs->pdf_draws++;
+    snprintf(hs->pdf_path, sizeof hs->pdf_path, "%s", path);
+}
+
 static xn_host make_host(host_state* hs) {
     memset(hs, 0, sizeof(*hs));
     hs->screen_target.c = &hs->screen;
@@ -212,6 +233,7 @@ static xn_host make_host(host_state* hs) {
         h_render, h_content, h_view, h_notice,
         h_post, h_cancel, h_frame,
         h_selection_menu, h_context_menu, h_tool_changed, h_text_edit,
+        p_count, p_size, p_draw,
     };
     return h;
 }
@@ -453,6 +475,54 @@ int main(int argc, char** argv) {
     CHECK(hs.surfaces_live == 0, "destroy releases every surface (%d left)", hs.surfaces_live);
     CHECK(stale_uses == 0 && double_releases == 0, "teardown is clean (%d stale, %d double)", stale_uses, double_releases);
     xn_note_close(note);
+
+    /* v2: a note over a PDF. */
+    char pdf[1024];
+    snprintf(pdf, sizeof pdf, "%s/lecture.pdf", argv[1]);
+    FILE* f = fopen(pdf, "wb");
+    if (f) {
+        fputs("%PDF-1.4 stand-in\n", f);
+        fclose(f);
+    }
+    err = NULL;
+    CHECK(xn_note_import_pdf("/no/such.txt", &host, &err) == NULL && err != NULL, "a non-PDF is refused");
+    xn_free_string(err);
+    err = NULL;
+    xn_note* lecture = xn_note_import_pdf(pdf, &host, &err);
+    CHECK(lecture != NULL, "import pdf: %s", err ? err : "");
+    if (lecture) {
+        double box[4];
+        CHECK(xn_note_page_count(lecture) == 3, "one page per PDF page");
+        CHECK(xn_note_dpi(lecture) == 150, "dpi");
+        CHECK(xn_note_page_box(lecture, 0, box) == 1 && box[2] > 1239 && box[2] < 1241 && box[3] > 1754 && box[3] < 1755,
+              "A4 at 150 dpi (%g x %g)", box[2], box[3]);
+        xn_editor* le = xn_editor_create(lecture, &host);
+        xn_editor_set_viewport(le, 800, 1000, 1.0);
+        hs.pdf_draws = 0;
+        xn_editor_paint(le, &hs.screen_target);
+        CHECK(hs.pdf_draws > 0 && strcmp(hs.pdf_path, pdf) == 0, "the PDF is the page background (%d)", hs.pdf_draws);
+        xn_editor_destroy(le);
+
+        hs.pdf_draws = 0;
+        memset(&hs.screen, 0, sizeof(hs.screen));
+        xn_note_paint_page(lecture, 1, &hs.screen_target, &host, 0xFFFFFFFFu, 2.0);
+        CHECK(hs.pdf_draws == 1 && hs.screen.fills > 0, "paint_page: paper and PDF (%d)", hs.pdf_draws);
+
+        char saved[1024];
+        snprintf(saved, sizeof saved, "%s/lecture.xnote", argv[1]);
+        CHECK(xn_note_save(lecture, saved, &host, &err) == 1, "save the PDF note: %s", err ? err : "");
+        xn_note_close(lecture);
+        char work2[1024];
+        snprintf(work2, sizeof work2, "%s", argv[1]);
+        xn_note* again = xn_note_open(saved, work2, &host, &err);
+        CHECK(again != NULL && xn_note_page_count(again) == 3, "reopened with its pages");
+        if (again) {
+            hs.pdf_path[0] = 0;
+            xn_note_paint_page(again, 0, &hs.screen_target, &host, 0xFFFFFFFFu, 1.0);
+            CHECK(is_pdf(hs.pdf_path) && strcmp(hs.pdf_path, pdf) != 0, "the embedded PDF was extracted (%s)", hs.pdf_path);
+            xn_note_close(again);
+        }
+    }
 
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

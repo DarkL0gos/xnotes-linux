@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 
+class QPdfDocument;
 class QTimer;
 
 namespace xn {
@@ -36,7 +37,8 @@ public:
 
 private:
     struct Layer {
-        QImage image;
+        // On the heap: the painter keeps the image's address, and a Layer moves (vector growth, restore).
+        std::unique_ptr<QImage> image;
         std::unique_ptr<QPainter> painter;
         QRect deviceRect;
         double alpha;
@@ -101,6 +103,10 @@ private:
     xn_host host_{};
     int liveSurfaces_ = 0;
     QHash<uint64_t, QTimer*> timers_;
+    /* Open PDFs by path, loaded on first use and kept while the host lives. */
+    QHash<QString, QPdfDocument*> pdfs_;
+
+    QPdfDocument* pdf(const char* path);
 
     static void* surfaceCreate(void* ctx, int w, int h, double dpr);
     static void surfaceFill(void* ctx, void* s, xn_rgba c);
@@ -121,6 +127,10 @@ private:
     static void contextMenu(void* ctx, double x, double y, int onLocked);
     static void toolChanged(void* ctx, const char* toolId);
     static void textEdit(void* ctx, const xn_text_field* field);
+    static int pdfPageCount(void* ctx, const char* path);
+    static int pdfPageSize(void* ctx, const char* path, int page, double* w, double* h);
+    static void drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
+                            int rw, int rh, double x, double y, double w, double h);
 
     void schedule(uint64_t task, int delayMs);
 };

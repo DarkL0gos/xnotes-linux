@@ -123,8 +123,9 @@ The core also builds as a native shared library for non-JVM hosts such as the Qt
 
 `linux-qt/` is a Qt 6 host of `libxnotes.so`: it edits `.xnote` files with pen pressure from
 tablets (the pen's eraser end erases), the mouse and touch, and follows the display's scale
-natively on Wayland. Needs Qt 6 development packages (`qt6-base-dev`, and `qt6-wayland` to run
-on Wayland) and CMake:
+natively on Wayland. Selection with its action bar, shapes, text boxes and images work; a PDF
+opens as a note over its pages, and notes export to PDF. Needs Qt 6 development packages
+(`qt6-base-dev`, `qt6-pdf-dev`, and `qt6-wayland` to run on Wayland) and CMake:
 
 ```bash
 ./gradlew -PdesktopOnly=true :capi:linkXnotesReleaseSharedLinuxX64

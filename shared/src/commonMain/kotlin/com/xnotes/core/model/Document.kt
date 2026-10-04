@@ -58,6 +58,21 @@ class Document(
     }
 
     companion object {
+        /**
+         * A note to annotate [pdf] (spec 08 §5): one page per PDF page, sized from its points at
+         * [dpi], each showing that page as its background. [pageSizesPt] stops at the first page
+         * that could not be read; an unreadable PDF still gives one blank A4 page.
+         */
+        fun fromPdf(pdf: File, pageSizesPt: List<Pair<Double, Double>>, dpi: Int = PageSize.DEFAULT_DPI): Document {
+            val doc = Document(dpi = dpi)
+            doc.pdfFile = pdf
+            pageSizesPt.forEachIndexed { i, (wPts, hPts) ->
+                doc.pages.add(Page(wPts / 72.0 * dpi, hPts / 72.0 * dpi, pdfPage = i))
+            }
+            if (doc.pages.isEmpty()) doc.pages.add(Page.blank(PageSize.A4, Orientation.PORTRAIT, dpi))
+            return doc
+        }
+
         const val DEFAULT_NEW_PAGES = 1
 
         /** A blank document of [count] pages of the given size/orientation. */

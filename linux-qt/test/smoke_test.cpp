@@ -4,6 +4,10 @@
 #include "CanvasWidget.h"
 #include "SelectionBar.h"
 #include "TextOverlay.h"
+#include "PdfExport.h"
+
+#include <QPdfDocument>
+#include <QPdfWriter>
 
 #include <QPointingDevice>
 #include <QTabletEvent>
@@ -349,6 +353,64 @@ private slots:
         QVERIFY(inkPixels(grab(canvas), canvas.rect()) > 1000);
         canvas.setNote(nullptr);
         xn_note_close(back);
+    }
+
+    /* A PDF becomes the pages' background; ink over it exports into a PDF of the same pages. */
+    void pdfImportAndExport() {
+        QTemporaryDir dir;
+        const QString source = dir.filePath(QStringLiteral("lecture.pdf"));
+        {
+            QPdfWriter writer(source);
+            writer.setPageSize(QPageSize(QPageSize::A4));
+            writer.setPageMargins(QMarginsF(0, 0, 0, 0));
+            writer.setResolution(72);
+            QPainter p(&writer);
+            p.fillRect(QRectF(100, 100, 300, 200), QColor(0, 0, 255));  // points from the top-left
+            writer.newPage();
+            p.fillRect(QRectF(50, 50, 100, 100), QColor(0, 160, 0));
+        }
+        CanvasWidget canvas;
+        canvas.resize(800, 1000);
+        canvas.show();
+        char* error = nullptr;
+        xn_note* note = xn_note_import_pdf(QFile::encodeName(source).constData(), canvas.host(), &error);
+        QVERIFY2(note, error);
+        QCOMPARE(xn_note_page_count(note), 2);
+        canvas.setNote(note);
+        canvas.setDark(false);
+        auto blue = [](const QImage& img) {
+            int n = 0;
+            for (int y = 0; y < img.height(); y += 2)
+                for (int x = 0; x < img.width(); x += 2) {
+                    const QColor c = img.pixelColor(x, y);
+                    if (c.blue() > 200 && c.red() < 60 && c.green() < 60) n++;
+                }
+            return n;
+        };
+        QVERIFY2(blue(grab(canvas)) > 1000, "the PDF page is drawn as the background");
+
+        xn_editor_set_ink_color(canvas.editor(), 0xff0000ff);
+        canvas.setTool("pen");
+        QTest::mousePress(&canvas, Qt::LeftButton, {}, QPoint(200, 700));
+        for (int i = 1; i <= 30; i++) QTest::mouseMove(&canvas, QPoint(200 + i * 10, 700));
+        QTest::mouseRelease(&canvas, Qt::LeftButton, {}, QPoint(500, 700));
+        QCOMPARE(xn_note_item_count(note, 0), 1);
+
+        const QString out = dir.filePath(QStringLiteral("export.pdf"));
+        int pagesDone = 0;
+        QCOMPARE(writePdf(note, canvas.host(), out, 0xFFFFFFFFu, [&](int done, int) { pagesDone = done; }), QString());
+        QCOMPARE(pagesDone, 2);
+        QPdfDocument exported;
+        QCOMPARE(exported.load(out), QPdfDocument::Error::None);
+        QCOMPARE(exported.pageCount(), 2);
+        const QSizeF size = exported.pagePointSize(0);
+        QVERIFY2(qAbs(size.width() - 595) < 2 && qAbs(size.height() - 842) < 2, qPrintable(QStringLiteral("%1x%2").arg(size.width()).arg(size.height())));
+        const QImage page = exported.render(0, QSize(595, 842)).convertToFormat(QImage::Format_RGB32);
+        QVERIFY2(blue(page) > 1000, "the PDF background is in the export");
+        QVERIFY2(inkPixels(page, page.rect()) > 50, "the ink is in the export");
+
+        canvas.setNote(nullptr);
+        xn_note_close(note);
     }
 
     void eraserEndErases() {

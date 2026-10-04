@@ -35,6 +35,7 @@ private:
     xn_note* note_ = nullptr;
     std::unique_ptr<QTemporaryDir> workDir_;
     QString path_;
+    QString suggestedName_;  // where "Save" proposes to put a note made from a PDF
     QAction* undo_;
     QAction* redo_;
     QAction* colorAction_;
@@ -76,4 +77,6 @@ private:
     void chooseImage();
     bool insertImageFile(const QString& path, QPointF at, bool atPoint);
     bool insertImage(const QString& file, QPointF at, bool atPoint);
+    bool importPdf(const QString& path, std::unique_ptr<QTemporaryDir> workDir);
+    void exportPdf();
 };

@@ -108,7 +108,7 @@ private fun MemScope.cPen(pen: Pen): CPointer<xn_pen> {
 }
 
 /** A Renderer drawing through the host's vtable into the host target [r]. */
-internal class CRenderer(private val vt: xn_renderer_vt, private val r: COpaquePointer?) : Renderer {
+internal class CRenderer(private val vt: xn_renderer_vt, internal val r: COpaquePointer?) : Renderer {
     override fun save() = vt.save!!.invoke(r)
     override fun restore() = vt.restore!!.invoke(r)
     override fun rotate(degrees: Double) = vt.rotate!!.invoke(r, degrees)

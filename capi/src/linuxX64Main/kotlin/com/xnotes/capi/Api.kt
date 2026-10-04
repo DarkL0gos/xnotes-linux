@@ -23,6 +23,15 @@ import com.xnotes.core.geometry.Pt
 import com.xnotes.core.history.History
 import com.xnotes.core.model.CanvasItem
 import com.xnotes.core.model.Document
+import com.xnotes.core.model.Page
+import com.xnotes.core.geometry.Rect
+import com.xnotes.core.platform.pathString
+import com.xnotes.core.pal.RasterSurface
+import com.xnotes.core.pal.Renderer
+import com.xnotes.core.pal.SurfaceFactory
+import kotlinx.cinterop.cstr
+import kotlin.math.ceil
+import kotlin.math.floor
 import com.xnotes.core.model.DrawStyle
 import com.xnotes.core.model.Rgba
 import com.xnotes.core.tools.ShapeKind
@@ -100,6 +109,34 @@ private fun codecFor(host: CPointer<xn_host>?): DocumentCodec {
     return DocumentCodec(CImageCodec(h), CTextMeasurer(h))
 }
 
+/**
+ * The slice of [page]'s PDF background inside [region] (page px), rendered by the host at [res]
+ * device px per page px. The raster covers the page's content box only; a margin is paper beside it.
+ */
+internal fun paintPdfBackground(host: xn_host, doc: Document, page: Page, renderer: Renderer, res: Double, region: Rect) {
+    val pdf = doc.pdfFile ?: return
+    val index = page.pdfPage ?: return
+    val draw = host.draw_pdf_page ?: return
+    val target = (renderer as? CRenderer)?.r ?: return
+    val l = region.left.coerceAtLeast(0.0)
+    val t = region.top.coerceAtLeast(0.0)
+    val r = region.right.coerceAtMost(page.width)
+    val b = region.bottom.coerceAtMost(page.height)
+    if (r <= l || b <= t) return
+    val rx = floor(l * res).toInt()
+    val ry = floor(t * res).toInt()
+    val rw = ceil(r * res).toInt() - rx
+    val rh = ceil(b * res).toInt() - ry
+    if (rw <= 0 || rh <= 0) return
+    memScoped {
+        // The pixel rect, mapped back to page px, so whole pixels land exactly.
+        draw.invoke(
+            host.ctx, target, pdf.pathString.cstr.ptr, index, ceil(page.width * res).toInt(), ceil(page.height * res).toInt(),
+            rx, ry, rw, rh, rx / res, ry / res, rw / res, rh / res,
+        )
+    }
+}
+
 private fun reportError(error: CPointer<CPointerVar<ByteVar>>?, t: Throwable) {
     error?.set(0, strdup(t.message ?: t::class.simpleName ?: "error"))
 }
@@ -132,6 +169,70 @@ fun xnNoteOpen(path: String?, workDir: String?, host: CPointer<xn_host>?, error:
     } catch (t: Throwable) {
         reportError(error, t)
         null
+    }
+
+@CName("xn_note_import_pdf")
+fun xnNoteImportPdf(path: String?, host: CPointer<xn_host>?, error: CPointer<CPointerVar<ByteVar>>?): COpaquePointer? =
+    try {
+        requireNotNull(path) { "path is null" }
+        val h = requireNotNull(host) { "host is null" }.pointed
+        val sizes = ArrayList<Pair<Double, Double>>()
+        memScoped {
+            val cpath = path.cstr.ptr
+            val count = h.pdf_page_count?.invoke(h.ctx, cpath) ?: error("the host reads no PDF")
+            require(count >= 0) { "Not a readable PDF" }
+            val w = alloc<DoubleVar>()
+            val hh = alloc<DoubleVar>()
+            for (i in 0 until count) {
+                if (h.pdf_page_size?.invoke(h.ctx, cpath, i, w.ptr, hh.ptr) != 1) break
+                sizes.add(w.value to hh.value)
+            }
+        }
+        StableRef.create(CNote(Document.fromPdf(fileOf(path), sizes))).asCPointer()
+    } catch (t: Throwable) {
+        reportError(error, t)
+        null
+    }
+
+@CName("xn_note_dpi")
+fun xnNoteDpi(note: COpaquePointer?): Int = guard(150) { note!!.note().document.dpi }
+
+@CName("xn_note_page_box")
+fun xnNotePageBox(note: COpaquePointer?, page: Int, out: CPointer<DoubleVar>?): Int = guard(0) {
+    val doc = note!!.note().document
+    val p = doc.pages.getOrNull(page) ?: return@guard 0
+    val box = pageBox(doc, p)
+    out!![0] = box.x
+    out[1] = box.y
+    out[2] = box.w
+    out[3] = box.h
+    1
+}
+
+/** The paper the page occupies, margins included, without an editor's view. */
+private fun pageBox(doc: Document, page: Page): Rect = exportState(doc).footprint(page)
+
+/** A view-less canvas state over [doc], for its page geometry and ruling; it caches nothing. */
+private fun exportState(doc: Document): CanvasState = CanvasState(doc, NoSurfaces, ChromePalette.DARK)
+
+private object NoSurfaces : SurfaceFactory {
+    override fun create(widthPx: Int, heightPx: Int, devicePixelRatio: Double): RasterSurface =
+        error("an export state draws no caches")
+}
+
+@CName("xn_note_paint_page")
+fun xnNotePaintPage(note: COpaquePointer?, page: Int, renderer: COpaquePointer?, host: CPointer<xn_host>?, paper: UInt, pdfScale: Double) =
+    guard(Unit) {
+        val doc = note!!.note().document
+        val p = doc.pages.getOrNull(page) ?: return@guard
+        val h = host!!.pointed
+        val st = exportState(doc)
+        val r = CRenderer(h.renderer!!.pointed, renderer)
+        val box = st.footprint(p)
+        r.fillRect(box, st.effectivePageColor(p) ?: unpack(paper))
+        paintPdfBackground(h, doc, p, r, pdfScale, box)
+        st.paintRuling(p, r, box)
+        for (item in p.items) item.paint(r)
     }
 
 @CName("xn_note_new")
@@ -253,8 +354,10 @@ internal class CEditor(note: CNote, private val host: xn_host) {
     val images = CImageCodec(host)
 
     init {
-        // Page ruling; embedded PDF pages are not rendered yet, so they show only their margins.
-        state.paintPageBackground = { page, renderer, _, region -> state.paintRuling(page, renderer, region) }
+        state.paintPageBackground = { page, renderer, res, region ->
+            paintPdfBackground(host, state.document, page, renderer, res, region)
+            state.paintRuling(page, renderer, region)
+        }
         controller.setTool(Tool.PEN)
     }
 

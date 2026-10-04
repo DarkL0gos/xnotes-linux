@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "CanvasWidget.h"
+#include "PdfExport.h"
 #include "SelectionBar.h"
 
 #include <QApplication>
@@ -113,6 +114,7 @@ void MainWindow::buildUi() {
     bar->addAction(QStringLiteral("Открыть…"), QKeySequence::Open, this, &MainWindow::chooseOpen);
     bar->addAction(QStringLiteral("Сохранить"), QKeySequence::Save, this, [this] { save(false); });
     bar->addAction(QStringLiteral("Сохранить как…"), QKeySequence::SaveAs, this, [this] { save(true); });
+    bar->addAction(QStringLiteral("Экспорт в PDF…"), QKeySequence(Qt::CTRL | Qt::Key_E), this, &MainWindow::exportPdf);
     bar->addSeparator();
 
     undo_ = bar->addAction(QStringLiteral("↶"), QKeySequence::Undo, this, [this] { if (canvas_->editor()) xn_editor_undo(canvas_->editor()); });
@@ -390,6 +392,7 @@ void MainWindow::showContextMenu(QPointF at, bool onLocked) {
 }
 
 void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path) {
+    suggestedName_.clear();
     canvas_->setNote(nullptr);
     if (note_) xn_note_close(note_);
     note_ = note;
@@ -413,6 +416,7 @@ bool MainWindow::open(const QString& path) {
         QMessageBox::warning(this, QStringLiteral("Открыть"), QStringLiteral("Не удалось создать временную папку"));
         return false;
     }
+    if (path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) return importPdf(path, std::move(workDir));
     char* error = nullptr;
     const QByteArray file = QFile::encodeName(QFileInfo(path).absoluteFilePath());
     const QByteArray dir = QFile::encodeName(workDir->path());
@@ -425,18 +429,57 @@ bool MainWindow::open(const QString& path) {
     return true;
 }
 
+/* A new note over a copy of the PDF (the note embeds it when saved); saving asks for a name. */
+bool MainWindow::importPdf(const QString& path, std::unique_ptr<QTemporaryDir> workDir) {
+    const QString copy = workDir->filePath(QStringLiteral("source.pdf"));
+    if (!QFile::copy(path, copy)) {
+        QMessageBox::warning(this, QStringLiteral("Открыть"), QStringLiteral("Не удалось скопировать %1").arg(path));
+        return false;
+    }
+    char* error = nullptr;
+    xn_note* note = xn_note_import_pdf(QFile::encodeName(copy).constData(), canvas_->host(), &error);
+    if (!note) {
+        QMessageBox::warning(this, QStringLiteral("Открыть"), QStringLiteral("Не удалось открыть PDF %1:\n%2").arg(path, takeError(error)));
+        return false;
+    }
+    install(note, std::move(workDir), QString());
+    suggestedName_ = QFileInfo(path).absolutePath() + QLatin1Char('/') + QFileInfo(path).completeBaseName() + QStringLiteral(".xnote");
+    refresh();
+    return true;
+}
+
 void MainWindow::chooseOpen() {
     if (!confirmDiscard()) return;
-    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Открыть заметку"), QFileInfo(path_).absolutePath(),
-                                                      QStringLiteral("Заметки xnotes (*.xnote)"));
+    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Открыть"), QFileInfo(path_).absolutePath(),
+                                                      QStringLiteral("Заметки и PDF (*.xnote *.pdf);;Заметки xnotes (*.xnote);;PDF (*.pdf)"));
     if (!path.isEmpty()) open(path);
+}
+
+/*
+ * The note as a PDF, a page per page at its own size: ink, shapes and text stay vector; a PDF
+ * background is rendered at 300 dpi; paper is the screen's paper, so light ink stays visible.
+ */
+void MainWindow::exportPdf() {
+    if (!note_) return;
+    QString base = !path_.isEmpty() ? path_ : suggestedName_;
+    base = base.isEmpty() ? QStringLiteral("note.pdf") : QFileInfo(base).absolutePath() + QLatin1Char('/') + QFileInfo(base).completeBaseName() + QStringLiteral(".pdf");
+    QString out = QFileDialog::getSaveFileName(this, QStringLiteral("Экспорт в PDF"), base, QStringLiteral("PDF (*.pdf)"));
+    if (out.isEmpty()) return;
+    if (!out.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) out += QLatin1String(".pdf");
+    const QString error = writePdf(note_, canvas_->host(), out, dark_ ? 0x161616FFu : 0xFFFFFFFFu, [this](int done, int total) {
+        statusBar()->showMessage(QStringLiteral("Экспорт: страница %1 из %2").arg(done).arg(total));
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    });
+    if (!error.isEmpty()) QMessageBox::warning(this, QStringLiteral("Экспорт в PDF"), error);
+    else statusBar()->showMessage(QStringLiteral("Экспортировано: %1").arg(out), 4000);
 }
 
 bool MainWindow::save(bool askPath) {
     if (!note_) return false;
     QString path = path_;
     if (askPath || path.isEmpty()) {
-        path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить заметку"), path.isEmpty() ? QStringLiteral("note.xnote") : path,
+        const QString start = !path.isEmpty() ? path : !suggestedName_.isEmpty() ? suggestedName_ : QStringLiteral("note.xnote");
+        path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить заметку"), start,
                                             QStringLiteral("Заметки xnotes (*.xnote)"));
         if (path.isEmpty()) return false;
         if (!path.endsWith(QLatin1String(".xnote"))) path += QLatin1String(".xnote");

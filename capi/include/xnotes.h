@@ -153,6 +153,18 @@ typedef struct xn_host {
        during the call; sent again when its style changes), or close it (field == NULL). While
        open, the box is not drawn on the canvas: the field shows it. */
     void (*text_edit)(void* ctx, const struct xn_text_field* field);
+
+    /* PDF (UTF-8 paths). A page count below 0 means the file cannot be read. */
+    int (*pdf_page_count)(void* ctx, const char* path);
+    /* A page's size in points; 0 when it cannot be read. */
+    int (*pdf_page_size)(void* ctx, const char* path, int page, double* width_pt, double* height_pt);
+    /*
+     * Draw part of a PDF page as a note page's background: the page rendered at full_w x full_h
+     * pixels, of which the pixel rect (rx, ry, rw, rh) goes into the renderer's rect
+     * (x, y, w, h) under its current transform.
+     */
+    void (*draw_pdf_page)(void* ctx, void* renderer, const char* path, int page, int full_w, int full_h,
+                          int rx, int ry, int rw, int rh, double x, double y, double w, double h);
 } xn_host;
 
 /* --- library -------------------------------------------------------------------------------- */
@@ -172,10 +184,28 @@ xn_note* xn_note_open(const char* path, const char* work_dir, const xn_host* hos
 /* A new note of `pages` blank A4 pages. */
 xn_note* xn_note_new(int pages);
 
+/*
+ * A new note over a PDF: one page per PDF page, each showing it as a background (needs the host's
+ * pdf_page_count and pdf_page_size). The note keeps referring to pdf_path until it is closed and
+ * embeds the file when saved, so the host copies it somewhere that lives as long.
+ */
+xn_note* xn_note_import_pdf(const char* pdf_path, const xn_host* host, char** error);
+
 /* Save to path: written to a temp file beside it, flushed to disk, then renamed over it. 1 on success. */
 int xn_note_save(xn_note* note, const char* path, const xn_host* host, char** error);
 
 int xn_note_page_count(const xn_note* note);
+/* Pixels per inch of the note's page coordinates (150 for notes made by xnotes). */
+int xn_note_dpi(const xn_note* note);
+/* The page's whole paper (margins included) in page pixels: x and y are 0 or negative. */
+int xn_note_page_box(const xn_note* note, int page, double* out_xywh);
+/*
+ * Draw a page for export or printing into renderer, in page pixels: paper (the page's own colour,
+ * else paper), the PDF background rendered at pdf_scale device pixels per page pixel, the ruling,
+ * and the items. The caller translates the renderer so the page box lands where it wants it.
+ */
+void xn_note_paint_page(xn_note* note, int page, void* renderer, const xn_host* host, xn_rgba paper,
+                        double pdf_scale);
 int xn_note_item_count(const xn_note* note, int page);
 int xn_note_is_dirty(const xn_note* note);
 void xn_note_close(xn_note* note);

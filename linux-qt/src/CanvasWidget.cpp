@@ -95,11 +95,23 @@ void CanvasWidget::setDark(bool dark) {
     xn_editor_set_palette(editor_, &p);
 }
 
+/*
+ * The core fits the first viewport it is given (fit to width, top of the page), so a hidden
+ * widget, whose size is still a placeholder, gives it none: the first real one comes on show.
+ */
 void CanvasWidget::updateViewport() {
     dpr_ = devicePixelRatioF();
-    if (!editor_) return;
+    if (!editor_ || !isVisible()) return;
     const int w = int(std::ceil(width() * dpr_)), h = int(std::ceil(height() * dpr_));
-    if (w > 0 && h > 0) xn_editor_set_viewport(editor_, w, h, dpr_);
+    if (w <= 0 || h <= 0) return;
+    xn_editor_set_viewport(editor_, w, h, dpr_);
+    textOverlay_->reposition();
+    emit viewChanged();
+}
+
+void CanvasWidget::showEvent(QShowEvent* e) {
+    QWidget::showEvent(e);
+    updateViewport();
 }
 
 bool CanvasWidget::event(QEvent* e) {
