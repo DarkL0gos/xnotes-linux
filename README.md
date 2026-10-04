@@ -27,6 +27,8 @@ input. Notes stay compatible with the Android app.
   repainted (about 0.1 ms per pen sample at 3456×2304); PDF pages render in the background.
 - **Page backgrounds**: paper colour and ruling (lines, dots or grid, with spacing, colour and
   opacity) for the whole note or a single page.
+- **Infinite canvases** (`.xcanvas`): pan and zoom without bounds, with the same tools, a
+  ruled or dotted background, and the same partial repaints while writing.
 - **Native Wayland scaling**, touchpad pinch zoom, scroll bars, dark and light paper.
 
 ## Building
@@ -57,12 +59,12 @@ Its tests: `./gradlew -PdesktopOnly=true :shared:jvmTest :shared:linuxX64Test :c
 cmake -S linux-qt -B linux-qt/build
 cmake --build linux-qt/build -j
 ctest --test-dir linux-qt/build          # optional: runs offscreen
-./linux-qt/build/xnotes-qt [note.xnote | document.pdf]
+./linux-qt/build/xnotes-qt [note.xnote | canvas.xcanvas | document.pdf]
 ```
 
 Frames are composed on the CPU by default; `--gl` composes them with OpenGL instead.
 
-To open `.xnote` files from the file manager (otherwise it treats them as ZIP archives), register
+To open `.xnote` and `.xcanvas` files from the file manager (otherwise it treats them as ZIP archives), register
 the file type and the application for your user. Rerun it after moving the build; `--remove`
 undoes it.
 
@@ -81,7 +83,7 @@ undoes it.
 - [x] PDF import with background rendering, PDF export
 - [x] Partial repaints while writing, fast zoom on large screens
 - [x] `.xnote` file type registration
-- [ ] Infinite canvas (`.xcanvas`)
+- [x] Infinite canvas (`.xcanvas`): drawing, erasing, selection, shapes, images, background, tiles at the exact zoom
 - [ ] Pen type selection (calligraphy, dashed, speed, taper)
 - [ ] Shape drawing
 

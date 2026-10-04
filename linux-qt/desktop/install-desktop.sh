@@ -1,6 +1,6 @@
 #!/bin/sh
-# Registers the Qt app for the current user: the .xnote file type, a menu entry, and xnotes as the
-# default application for .xnote (PDFs only get it in "Open with"). Exec points at the build, so
+# Registers the Qt app for the current user: the .xnote and .xcanvas file types, a menu entry, and xnotes as the
+# default application for both (PDFs only get it in "Open with"). Exec points at the build, so
 # rerun after moving it. Undo with: install-desktop.sh --remove
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -31,8 +31,9 @@ Exec="$exe" %f
 Icon=accessories-text-editor
 Terminal=false
 Categories=Office;Graphics;
-MimeType=application/x-xnote;application/pdf;
+MimeType=application/x-xnote;application/x-xcanvas;application/pdf;
 DESKTOP
 update-desktop-database "$data/applications" 2>/dev/null || true
 xdg-mime default xnotes-qt.desktop application/x-xnote
-echo "registered $exe for .xnote"
+xdg-mime default xnotes-qt.desktop application/x-xcanvas
+echo "registered $exe for .xnote and .xcanvas"

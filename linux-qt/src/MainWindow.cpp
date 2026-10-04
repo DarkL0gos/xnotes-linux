@@ -147,10 +147,18 @@ MainWindow::~MainWindow() {
 void MainWindow::buildUi() {
     QToolBar* bar = addToolBar(QStringLiteral("Основное"));
     bar->setMovable(false);
+    auto* create = new QToolButton(this);
+    create->setText(QStringLiteral("Создать"));
+    create->setPopupMode(QToolButton::InstantPopup);
+    auto* createMenu = new QMenu(create);
+    createMenu->addAction(QStringLiteral("Заметку"), QKeySequence::New, this, [this] { if (confirmDiscard()) newNote(); });
+    createMenu->addAction(QStringLiteral("Холст"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N), this, [this] { if (confirmDiscard()) newCanvas(); });
+    create->setMenu(createMenu);
+    bar->addWidget(create);
     bar->addAction(QStringLiteral("Открыть…"), QKeySequence::Open, this, &MainWindow::chooseOpen);
     bar->addAction(QStringLiteral("Сохранить"), QKeySequence::Save, this, [this] { save(false); });
     bar->addAction(QStringLiteral("Сохранить как…"), QKeySequence::SaveAs, this, [this] { save(true); });
-    bar->addAction(QStringLiteral("Экспорт в PDF…"), QKeySequence(Qt::CTRL | Qt::Key_E), this, &MainWindow::exportPdf);
+    exportAction_ = bar->addAction(QStringLiteral("Экспорт в PDF…"), QKeySequence(Qt::CTRL | Qt::Key_E), this, &MainWindow::exportPdf);
     bar->addSeparator();
 
     undo_ = bar->addAction(QStringLiteral("↶"), QKeySequence::Undo, this, [this] { if (canvas_->editor()) xn_editor_undo(canvas_->editor()); });
@@ -160,14 +168,14 @@ void MainWindow::buildUi() {
     redo_->setToolTip(QStringLiteral("Повторить (Ctrl+Shift+Z)"));
     bar->addSeparator();
 
-    bar->addAction(QStringLiteral("←"), QKeySequence(Qt::Key_PageUp), this, [this] {
+    pageActions_ << bar->addAction(QStringLiteral("←"), QKeySequence(Qt::Key_PageUp), this, [this] {
         if (auto* e = canvas_->editor()) xn_editor_go_to_page(e, std::max(0, xn_editor_current_page(e) - 1));
     });
     pageLabel_ = new QLabel(this);
     pageLabel_->setMinimumWidth(60);
     pageLabel_->setAlignment(Qt::AlignCenter);
-    bar->addWidget(pageLabel_);
-    bar->addAction(QStringLiteral("→"), QKeySequence(Qt::Key_PageDown), this, [this] {
+    pageActions_ << bar->addWidget(pageLabel_);
+    pageActions_ << bar->addAction(QStringLiteral("→"), QKeySequence(Qt::Key_PageDown), this, [this] {
         if (auto* e = canvas_->editor()) xn_editor_go_to_page(e, std::min(xn_note_page_count(note_) - 1, xn_editor_current_page(e) + 1));
     });
     bar->addAction(QStringLiteral("−"), QKeySequence::ZoomOut, this, [this] { if (auto* e = canvas_->editor()) xn_editor_zoom_step(e, 0); });
@@ -176,9 +184,9 @@ void MainWindow::buildUi() {
     zoomLabel_->setAlignment(Qt::AlignCenter);
     bar->addWidget(zoomLabel_);
     bar->addAction(QStringLiteral("+"), QKeySequence(Qt::CTRL | Qt::Key_Equal), this, [this] { if (auto* e = canvas_->editor()) xn_editor_zoom_step(e, 1); });
-    bar->addAction(QStringLiteral("По ширине"), this, [this] { if (auto* e = canvas_->editor()) xn_editor_fit_width(e); });
-    bar->addAction(QStringLiteral("+ Страница"), this, [this] { if (auto* e = canvas_->editor()) xn_editor_add_page(e); });
-    bar->addAction(QStringLiteral("− Страница"), this, [this] {
+    fitAction_ = bar->addAction(QStringLiteral("По ширине"), this, [this] { if (auto* e = canvas_->editor()) xn_editor_fit_width(e); });
+    pageActions_ << bar->addAction(QStringLiteral("+ Страница"), this, [this] { if (auto* e = canvas_->editor()) xn_editor_add_page(e); });
+    pageActions_ << bar->addAction(QStringLiteral("− Страница"), this, [this] {
         if (!canvas_->editor()) return;
         if (QMessageBox::question(this, QStringLiteral("Удалить страницу"), QStringLiteral("Удалить текущую страницу?")) == QMessageBox::Yes)
             xn_editor_delete_current_page(canvas_->editor());
@@ -187,7 +195,7 @@ void MainWindow::buildUi() {
     bar->addAction(QStringLiteral("Фон…"), this, [this] {
         if (!canvas_->editor()) return;
         if (!pageStyle_) {
-            pageStyle_ = new PageStylePopup(canvas_->editor(), this);
+            pageStyle_ = new PageStylePopup(canvas_->editor(), xn_note_is_canvas(note_) != 0, this);
             pageStyle_->setAttribute(Qt::WA_DeleteOnClose);
         }
         pageStyle_->show();
@@ -322,7 +330,7 @@ void MainWindow::buildUi() {
     };
     bind(QKeySequence(Qt::Key_Escape), [this] { if (canvas_->editor()) xn_editor_escape(canvas_->editor()); });
     bind(QKeySequence(Qt::Key_Delete), [this] { if (canvas_->editor()) xn_editor_delete_selection(canvas_->editor()); });
-    bind(QKeySequence::New, [this] { if (confirmDiscard()) newNote(); });
+
     bind(QKeySequence::Copy, [this] { if (canvas_->editor()) xn_editor_copy(canvas_->editor()); clipboardIsNewer_ = false; });
     bind(QKeySequence::Cut, [this] { if (canvas_->editor()) xn_editor_cut(canvas_->editor()); clipboardIsNewer_ = false; });
     connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] { clipboardIsNewer_ = true; });
@@ -466,6 +474,7 @@ void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, 
     workDir_ = std::move(workDir);
     path_ = path;
     canvas_->setNote(note_);
+    applyKind();
     canvas_->setDark(dark_);
     if (QAction* tool = tools_->checkedAction()) canvas_->setTool(tool->data().toByteArray().constData());
     if (colorAction_->data().isValid()) setInk(colorAction_->data().value<QColor>());
@@ -476,6 +485,24 @@ void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, 
 }
 
 void MainWindow::newNote() { install(xn_note_new(1), std::make_unique<QTemporaryDir>(), QString()); }
+
+void MainWindow::newCanvas() { install(xn_canvas_new(), std::make_unique<QTemporaryDir>(), QString()); }
+
+/* An infinite canvas has no pages, text boxes or PDF export: their controls step aside. */
+void MainWindow::applyKind() {
+    const bool canvas = note_ && xn_note_is_canvas(note_);
+    for (QAction* a : std::as_const(pageActions_)) a->setVisible(!canvas);
+    exportAction_->setEnabled(!canvas);
+    fitAction_->setText(canvas ? QStringLiteral("Показать всё") : QStringLiteral("По ширине"));
+    for (QAction* a : tools_->actions()) {
+        if (a->data().toByteArray() != "text_box") continue;
+        a->setVisible(!canvas);
+        if (canvas && a->isChecked()) {
+            for (QAction* pen : tools_->actions())
+                if (pen->data().toByteArray() == "pen") pen->trigger();
+        }
+    }
+}
 
 bool MainWindow::open(const QString& path) {
     auto workDir = std::make_unique<QTemporaryDir>();
@@ -561,7 +588,7 @@ bool MainWindow::importPdf(const QString& path, std::unique_ptr<QTemporaryDir> w
 void MainWindow::chooseOpen() {
     if (!confirmDiscard()) return;
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Открыть"), QFileInfo(path_).absolutePath(),
-                                                      QStringLiteral("Заметки и PDF (*.xnote *.pdf);;Заметки xnotes (*.xnote);;PDF (*.pdf)"));
+                                                      QStringLiteral("Заметки, холсты и PDF (*.xnote *.xcanvas *.pdf);;Заметки (*.xnote);;Холсты (*.xcanvas);;PDF (*.pdf)"));
     if (!path.isEmpty()) open(path);
 }
 
@@ -588,11 +615,14 @@ bool MainWindow::save(bool askPath) {
     if (!note_) return false;
     QString path = path_;
     if (askPath || path.isEmpty()) {
-        const QString start = !path.isEmpty() ? path : !suggestedName_.isEmpty() ? suggestedName_ : QStringLiteral("note.xnote");
-        path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить заметку"), start,
-                                            QStringLiteral("Заметки xnotes (*.xnote)"));
+        // A canvas is saved as .xcanvas, a note as .xnote: the format follows the document.
+        const bool canvas = xn_note_is_canvas(note_);
+        const QString ext = canvas ? QStringLiteral(".xcanvas") : QStringLiteral(".xnote");
+        const QString start = !path.isEmpty() ? path : !suggestedName_.isEmpty() ? suggestedName_ : (canvas ? QStringLiteral("canvas") : QStringLiteral("note")) + ext;
+        path = QFileDialog::getSaveFileName(this, canvas ? QStringLiteral("Сохранить холст") : QStringLiteral("Сохранить заметку"), start,
+                                            canvas ? QStringLiteral("Холсты xnotes (*.xcanvas)") : QStringLiteral("Заметки xnotes (*.xnote)"));
         if (path.isEmpty()) return false;
-        if (!path.endsWith(QLatin1String(".xnote"))) path += QLatin1String(".xnote");
+        if (!path.endsWith(ext)) path += ext;
     }
     char* error = nullptr;
     if (!xn_note_save(note_, QFile::encodeName(path).constData(), canvas_->host(), &error)) {
@@ -634,7 +664,8 @@ void MainWindow::refresh() {
     auto* e = canvas_->editor();
     undo_->setEnabled(e && xn_editor_can_undo(e));
     redo_->setEnabled(e && xn_editor_can_redo(e));
-    const QString name = path_.isEmpty() ? QStringLiteral("Новая заметка") : QFileInfo(path_).fileName();
+    const bool canvas = note_ && xn_note_is_canvas(note_);
+    const QString name = !path_.isEmpty() ? QFileInfo(path_).fileName() : canvas ? QStringLiteral("Новый холст") : QStringLiteral("Новая заметка");
     const bool dirty = note_ && xn_note_is_dirty(note_);
     setWindowTitle((dirty ? QStringLiteral("• ") : QString()) + name + QStringLiteral(" — xnotes"));
     refreshView();
@@ -661,6 +692,7 @@ void MainWindow::refreshView() {
     syncScrollBars();
     auto* e = canvas_->editor();
     if (!e || !note_) return;
-    pageLabel_->setText(QStringLiteral("%1 / %2").arg(xn_editor_current_page(e) + 1).arg(xn_note_page_count(note_)));
+    if (!xn_note_is_canvas(note_))
+        pageLabel_->setText(QStringLiteral("%1 / %2").arg(xn_editor_current_page(e) + 1).arg(xn_note_page_count(note_)));
     zoomLabel_->setText(QStringLiteral("%1%").arg(int(xn_editor_zoom(e) * 100)));
 }

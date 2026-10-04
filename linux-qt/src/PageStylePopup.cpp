@@ -66,8 +66,8 @@ QLabel* caption(const QString& text, QWidget* parent) {
 
 }  // namespace
 
-PageStylePopup::PageStylePopup(xn_editor* editor, QWidget* parent) : QDialog(parent), editor_(editor) {
-    setWindowTitle(QStringLiteral("Фон страниц"));
+PageStylePopup::PageStylePopup(xn_editor* editor, bool canvas, QWidget* parent) : QDialog(parent), editor_(editor) {
+    setWindowTitle(canvas ? QStringLiteral("Фон холста") : QStringLiteral("Фон страниц"));
     auto* col = new QVBoxLayout(this);
 
     auto* scopeRow = new QHBoxLayout;
@@ -80,6 +80,8 @@ PageStylePopup::PageStylePopup(xn_editor* editor, QWidget* parent) : QDialog(par
     scopeRow->addWidget(all);
     scopeRow->addWidget(current);
     col->addLayout(scopeRow);
+    all->setVisible(!canvas);  // a canvas has one background
+    current->setVisible(!canvas);
     connect(scope_, &QButtonGroup::idClicked, this, [this](int id) {
         allPages_ = id == 1;
         load();

@@ -16,7 +16,8 @@ class QToolButton;
 class PageStylePopup : public QDialog {
     Q_OBJECT
 public:
-    PageStylePopup(xn_editor* editor, QWidget* parent);
+    /* canvas: an infinite canvas's background, one for the whole canvas. */
+    PageStylePopup(xn_editor* editor, bool canvas, QWidget* parent);
 
 private:
     xn_editor* editor_;

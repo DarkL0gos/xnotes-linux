@@ -593,8 +593,12 @@ private slots:
      * into one kept target, the result must be the full frame, for ink and for the highlighter's
      * multiply layer, on whichever path this run renders.
      */
-    void partialFramesMatchFull() {
-        xn_note* note = xn_note_new(1);
+    void partialFramesMatchFull() { partialFramesOn(xn_note_new(1)); }
+
+    /* The same on an infinite canvas, whose ink comes from tiles and a composed base. */
+    void partialFramesMatchFullOnCanvas() { partialFramesOn(xn_canvas_new()); }
+
+    void partialFramesOn(xn_note* note) {
         CanvasWidget canvas;
         canvas.resize(700, 900);
         canvas.show();
@@ -623,14 +627,30 @@ private slots:
             const QImage incremental = kept.image();
             const QImage full = KeptTarget(canvas, gl).frame(false).image();
             // The settled run is baked into a raster while it stays on screen as it was drawn live,
-            // so edges may differ by antialiasing; missing or extra ink would differ by far more.
+            // so edges may differ by antialiasing, and a thin line by a fraction of a pixel; missing
+            // or extra ink would differ by far more. Compared through a 3x3 average, which a
+            // sub-pixel shift survives and a hole does not.
+            auto blurred = [](const QImage& img, int x, int y, int c) {
+                int sum = 0, n = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        const int xx = std::clamp(x + dx, 0, img.width() - 1), yy = std::clamp(y + dy, 0, img.height() - 1);
+                        const QRgb p = img.pixel(xx, yy);
+                        sum += c == 0 ? qRed(p) : c == 1 ? qGreen(p) : qBlue(p);
+                        n++;
+                    }
+                return sum / n;
+            };
             int edges = 0, wrong = 0;
             for (int yy = 0; yy < full.height(); yy++)
                 for (int xx = 0; xx < full.width(); xx++) {
                     const QColor a = full.pixelColor(xx, yy), b = incremental.pixelColor(xx, yy);
                     const int d = std::max({qAbs(a.red() - b.red()), qAbs(a.green() - b.green()), qAbs(a.blue() - b.blue())});
-                    if (d > 128) wrong++;
-                    else if (d > 32) edges++;
+                    if (d <= 32) continue;
+                    edges++;
+                    int bd = 0;
+                    for (int c = 0; c < 3; c++) bd = std::max(bd, qAbs(blurred(full, xx, yy, c) - blurred(incremental, xx, yy, c)));
+                    if (bd > 64) wrong++;
                 }
             if (wrong > 0 && qEnvironmentVariableIsSet("XNOTES_SMOKE_SHOT")) {
                 incremental.save(qEnvironmentVariable("XNOTES_SMOKE_SHOT") + "-inc.png");
@@ -719,7 +739,7 @@ private slots:
         };
         QCOMPARE(rules(grab(canvas)), std::pair(0, 0));
 
-        PageStylePopup dialog(canvas.editor(), nullptr);
+        PageStylePopup dialog(canvas.editor(), false, nullptr);
         auto button = [&](const QString& text) {
             for (QAbstractButton* b : dialog.findChildren<QAbstractButton*>())
                 if (b->text() == text) return b;
@@ -801,6 +821,71 @@ private slots:
         QCOMPARE(xn_editor_tool_width(canvas->editor(), "highlighter"), 15.0);
         xn_note* n = window.note();
         QVERIFY(xn_note_is_dirty(n));
+    }
+
+    /* An infinite canvas in the window: page controls give way, ink goes on and pans, it saves. */
+    void infiniteCanvas() {
+        QTemporaryDir dir;
+        MainWindow window;
+        window.newCanvas();
+        window.resize(2400, 900);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTest::qWait(50);
+        auto* canvas = window.findChild<CanvasWidget*>();
+        auto action = [&](const QString& text) {
+            for (QAction* a : window.findChildren<QAction*>())
+                if (a->text() == text) return a;
+            return static_cast<QAction*>(nullptr);
+        };
+        QVERIFY(xn_note_is_canvas(window.note()));
+        QVERIFY(!action(QStringLiteral("+ Страница"))->isVisible());
+        QVERIFY(!action(QStringLiteral("Текст"))->isVisible());
+        QVERIFY(action(QStringLiteral("Показать всё")));
+        QVERIFY(!action(QStringLiteral("Экспорт в PDF…"))->isEnabled());
+
+        // Dark ink on white paper, with no ruling, so the ink is easy to find.
+        canvas->setDark(false);
+        xn_page_style plain{1, 0xFFFFFFFFu, XN_PATTERN_NONE, 0, 0, 0};
+        xn_editor_set_page_style(canvas->editor(), 1, &plain);
+        xn_editor_set_ink_color(canvas->editor(), 0xff0000ff);
+        action(QStringLiteral("Перо"))->trigger();
+        QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(300, 300));
+        for (int i = 1; i <= 40; i++) QTest::mouseMove(canvas, QPoint(300 + i * 10, 300));
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, QPoint(700, 300));
+        QCOMPARE(xn_note_item_count(window.note(), 0), 1);
+        auto redAt = [&](int y) { return inkPixels(grab(*canvas), QRect(320, y - 6, 360, 12)); };
+        QVERIFY2(redAt(300) > 300, qPrintable(QStringLiteral("%1 ink pixels").arg(redAt(300))));
+
+        // Scroll down by a wheel notch: the ink moves up by the same amount.
+        QTest::wheelEvent(canvas, QPointF(500, 400), QPoint(0, -120));
+        QVERIFY(redAt(300) < 20);
+        QVERIFY(redAt(240) > 300);
+        const double zoom = xn_editor_zoom(canvas->editor());
+        action(QStringLiteral("+"))->trigger();
+        QVERIFY(xn_editor_zoom(canvas->editor()) > zoom);
+        action(QStringLiteral("Показать всё"))->trigger();
+        QVERIFY(inkPixels(grab(*canvas), canvas->rect()) > 300);
+
+        // Its background, through the dialog: one for the whole canvas.
+        PageStylePopup dialog(canvas->editor(), true, nullptr);
+        for (QAbstractButton* b : dialog.findChildren<QAbstractButton*>()) {
+            if (b->text() == QStringLiteral("Текущая страница")) QVERIFY(!b->isVisibleTo(&dialog));
+            if (b->text() == QStringLiteral("Точки")) b->click();
+        }
+        xn_page_style bg{};
+        xn_editor_page_style(canvas->editor(), 1, &bg);
+        QCOMPARE(bg.pattern, int(XN_PATTERN_DOTS));
+
+        const QString path = dir.filePath(QStringLiteral("board.xcanvas"));
+        char* error = nullptr;
+        QVERIFY(xn_note_save(window.note(), QFile::encodeName(path).constData(), canvas->host(), &error));
+        QVERIFY(window.open(path));
+        QVERIFY(xn_note_is_canvas(window.note()));
+        QCOMPARE(xn_note_item_count(window.note(), 0), 1);
+        QVERIFY(inkPixels(grab(*canvas), canvas->rect()) > 100);
+        window.newNote();
+        QVERIFY(action(QStringLiteral("+ Страница"))->isVisible());
     }
 
     void eraserEndErases() {

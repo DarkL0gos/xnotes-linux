@@ -29,6 +29,7 @@ public:
     /* Open path; on failure shows why and keeps the current note. */
     bool open(const QString& path);
     void newNote();
+    void newCanvas();
     xn_note* note() const { return note_; }
 
 protected:
@@ -43,6 +44,9 @@ private:
     QAction* undo_;
     QAction* redo_;
     QAction* colorAction_;
+    QAction* exportAction_;
+    QAction* fitAction_;
+    QList<QAction*> pageActions_;
     QActionGroup* tools_;
     QLabel* pageLabel_;
     QLabel* zoomLabel_;
@@ -71,6 +75,7 @@ private:
 
     void install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path);
     void buildUi();
+    void applyKind();
     void refresh();
     void refreshView();
     void syncScrollBars();
