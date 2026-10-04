@@ -187,6 +187,15 @@ xn_note* xn_note_open(const char* path, const char* work_dir, const xn_host* hos
 xn_note* xn_note_new(int pages);
 
 /*
+ * Infinite canvases (.xcanvas) are notes too: xn_note_open reads one by its extension, and an
+ * editor over one draws, erases, selects, zooms and scrolls through the same calls. It has no
+ * pages: page counts are 0, xn_note_item_count gives its items for any page, page commands and
+ * text boxes do nothing, and the page style is the canvas background (paper, ruling, spacing).
+ */
+xn_note* xn_canvas_new(void);
+int xn_note_is_canvas(const xn_note* note);
+
+/*
  * A new note over a PDF: one page per PDF page, each showing it as a background (needs the host's
  * pdf_page_count and pdf_page_size). The note keeps referring to pdf_path until it is closed and
  * embeds the file when saved, so the host copies it somewhere that lives as long.

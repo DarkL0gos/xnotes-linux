@@ -26,7 +26,12 @@ import kotlinx.cinterop.UIntVar
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.history.History
 import com.xnotes.core.model.CanvasItem
+import com.xnotes.core.infinite.CanvasBackground
+import com.xnotes.core.infinite.InfiniteDocument
 import com.xnotes.core.model.Document
+import com.xnotes.editor.InfiniteCanvasEditor
+import com.xnotes.editor.InfiniteCanvasHost
+import com.xnotes.format.CanvasCodec
 import com.xnotes.core.model.Page
 import com.xnotes.core.model.Stroke
 import com.xnotes.canvas.FrontInkSink
@@ -150,13 +155,31 @@ private fun reportError(error: CPointer<CPointerVar<ByteVar>>?, t: Throwable) {
 
 internal class CNote(val document: Document)
 
-private fun COpaquePointer.note(): CNote = asStableRef<CNote>().get()
+/** An infinite canvas (.xcanvas). */
+internal class CCanvasNote(val canvas: InfiniteDocument)
+
+private fun isCanvasPath(path: String) = path.lowercase().endsWith("." + InfiniteDocument.EXTENSION)
+
+private fun canvasCodecFor(host: CPointer<xn_host>?) = CanvasCodec(if (host == null) NoImageCodec else CImageCodec(host.pointed))
+
+/*
+ * A note handle holds a paged note (CNote) or an infinite canvas (CCanvasNote), an editor handle a
+ * CEditor or a CCanvasEditor. The casts are checked: a paged-only call on a canvas throws, and
+ * guard turns that into its fallback.
+ */
+private fun COpaquePointer.note(): CNote = asStableRef<Any>().get() as CNote
+
+private fun COpaquePointer.canvasNote(): CCanvasNote? = asStableRef<Any>().get() as? CCanvasNote
 
 /** The editor behind a handle, for a call that may change what is on screen: the next frame is a full one. */
-private fun COpaquePointer.editor(): CEditor = asStableRef<CEditor>().get().also { it.fullFrame = true }
+private fun COpaquePointer.editor(): CEditor = (asStableRef<Any>().get() as CEditor).also { it.fullFrame = true }
 
 /** The editor, for input, painting and timers, which say themselves what they changed. */
-private fun COpaquePointer.editorQuiet(): CEditor = asStableRef<CEditor>().get()
+private fun COpaquePointer.editorQuiet(): CEditor = asStableRef<Any>().get() as CEditor
+
+/** The canvas editor behind a handle, or null for a paged one; [quiet] as for [editorQuiet]. */
+private fun COpaquePointer.canvas(quiet: Boolean = false): CCanvasEditor? =
+    (asStableRef<Any>().get() as? CCanvasEditor)?.also { if (!quiet) it.editor.fullFrame = true }
 
 @CName("xn_api_version")
 fun xnApiVersion(): Int = 2
@@ -171,12 +194,21 @@ fun xnNoteOpen(path: String?, workDir: String?, host: CPointer<xn_host>?, error:
     try {
         requireNotNull(path) { "path is null" }
         val dir = workDir?.let { fileOf(it) }
-        val doc = FileSystem.SYSTEM.source(path.toPath()).use { source ->
-            codecFor(host).read(source.asInputStream(), dir, dir)
+        if (isCanvasPath(path)) {
+            val canvas = FileSystem.SYSTEM.source(path.toPath()).use { source ->
+                canvasCodecFor(host).read(source.asInputStream(), dir)
+            }
+            canvas.path = path
+            canvas.displayName = path.substringAfterLast('/')
+            StableRef.create(CCanvasNote(canvas)).asCPointer()
+        } else {
+            val doc = FileSystem.SYSTEM.source(path.toPath()).use { source ->
+                codecFor(host).read(source.asInputStream(), dir, dir)
+            }
+            doc.path = path
+            doc.displayName = path.substringAfterLast('/')
+            StableRef.create(CNote(doc)).asCPointer()
         }
-        doc.path = path
-        doc.displayName = path.substringAfterLast('/')
-        StableRef.create(CNote(doc)).asCPointer()
     } catch (t: Throwable) {
         reportError(error, t)
         null
@@ -250,12 +282,20 @@ fun xnNotePaintPage(note: COpaquePointer?, page: Int, renderer: COpaquePointer?,
 fun xnNoteNew(pages: Int): COpaquePointer? =
     runCatching { StableRef.create(CNote(Document.blank(pages.coerceAtLeast(1)))).asCPointer() }.getOrNull()
 
+@CName("xn_canvas_new")
+fun xnCanvasNew(): COpaquePointer? =
+    runCatching { StableRef.create(CCanvasNote(InfiniteDocument())).asCPointer() }.getOrNull()
+
+@CName("xn_note_is_canvas")
+fun xnNoteIsCanvas(note: COpaquePointer?): Int = runCatching { if (note!!.canvasNote() != null) 1 else 0 }.getOrDefault(0)
+
 @CName("xn_note_save")
 fun xnNoteSave(note: COpaquePointer?, path: String?, host: CPointer<xn_host>?, error: CPointer<CPointerVar<ByteVar>>?): Int =
     try {
         requireNotNull(note) { "note is null" }
         requireNotNull(path) { "path is null" }
-        val doc = note.note().document
+        val canvas = note.canvasNote()?.canvas
+        val doc = if (canvas == null) note.note().document else null
         val target = path.toPath()
         val tmp = (target.parent ?: ".".toPath()) / ".${target.name}.saving"
         val fs = FileSystem.SYSTEM
@@ -264,7 +304,8 @@ fun xnNoteSave(note: COpaquePointer?, path: String?, host: CPointer<xn_host>?, e
                 handle.resize(0L)
                 val sink = handle.sink()
                 try {
-                    codecFor(host).write(doc, sink.asOutputStream())
+                    if (canvas != null) canvasCodecFor(host).write(canvas, sink.asOutputStream())
+                    else codecFor(host).write(doc!!, sink.asOutputStream())
                 } finally {
                     sink.close()
                 }
@@ -278,9 +319,15 @@ fun xnNoteSave(note: COpaquePointer?, path: String?, host: CPointer<xn_host>?, e
         } finally {
             runCatching { fs.delete(tmp) }
         }
-        doc.path = path
-        doc.displayName = target.name
-        doc.dirty = false
+        if (canvas != null) {
+            canvas.path = path
+            canvas.displayName = target.name
+            canvas.dirty = false
+        } else {
+            doc!!.path = path
+            doc.displayName = target.name
+            doc.dirty = false
+        }
         1
     } catch (t: Throwable) {
         reportError(error, t)
@@ -288,18 +335,25 @@ fun xnNoteSave(note: COpaquePointer?, path: String?, host: CPointer<xn_host>?, e
     }
 
 @CName("xn_note_page_count")
-fun xnNotePageCount(note: COpaquePointer?): Int = runCatching { note!!.note().document.pages.size }.getOrDefault(0)
+fun xnNotePageCount(note: COpaquePointer?): Int = runCatching {
+    if (note!!.canvasNote() != null) 0 else note.note().document.pages.size
+}.getOrDefault(0)
 
 @CName("xn_note_item_count")
-fun xnNoteItemCount(note: COpaquePointer?, page: Int): Int =
-    runCatching { note!!.note().document.pages[page].items.size }.getOrDefault(-1)
+fun xnNoteItemCount(note: COpaquePointer?, page: Int): Int = runCatching {
+    note!!.canvasNote()?.let { return@runCatching it.canvas.itemCount }
+    note.note().document.pages[page].items.size
+}.getOrDefault(-1)
 
 @CName("xn_note_is_dirty")
-fun xnNoteIsDirty(note: COpaquePointer?): Int = runCatching { if (note!!.note().document.dirty) 1 else 0 }.getOrDefault(0)
+fun xnNoteIsDirty(note: COpaquePointer?): Int = runCatching {
+    val dirty = note!!.canvasNote()?.canvas?.dirty ?: note.note().document.dirty
+    if (dirty) 1 else 0
+}.getOrDefault(0)
 
 @CName("xn_note_close")
 fun xnNoteClose(note: COpaquePointer?) {
-    runCatching { note?.asStableRef<CNote>()?.dispose() }
+    runCatching { note?.asStableRef<Any>()?.dispose() }
 }
 
 // --- editor -------------------------------------------------------------------------------------
@@ -515,6 +569,109 @@ internal class CEditor(note: CNote, private val host: xn_host) {
 }
 
 
+/** An infinite canvas editor over the host's services: the shared InfiniteCanvasEditor. */
+internal class CCanvasEditor(note: CCanvasNote, private val host: xn_host) {
+    private val scheduler = CScheduler(host)
+    private val surfaces = CSurfaceFactory(host)
+    val images = CImageCodec(host)
+    val editor = InfiniteCanvasEditor(note.canvas, surfaces, scheduler, CTextMeasurer(host), object : InfiniteCanvasHost {
+        override fun requestRender() = host.request_render!!.invoke(host.ctx)
+        override fun contentChanged() = host.content_changed!!.invoke(host.ctx)
+        override fun viewChanged() = host.view_changed!!.invoke(host.ctx)
+        override fun toolChanged(tool: Tool) {
+            host.tool_changed?.invoke(host.ctx, toolName(tool))
+        }
+
+        override fun selectionMenu(rect: Rect?) {
+            host.selection_menu?.invoke(host.ctx, if (rect != null) 1 else 0, rect?.x ?: 0.0, rect?.y ?: 0.0, rect?.w ?: 0.0, rect?.h ?: 0.0)
+        }
+
+        override fun contextMenu(at: Pt, locked: CanvasItem?) {
+            host.context_menu?.invoke(host.ctx, at.x, at.y, if (locked != null) 1 else 0)
+        }
+    })
+
+    fun paint(target: COpaquePointer?) {
+        surfaces.drain()
+        editor.paint(CRenderer(host.renderer!!.pointed, target))
+    }
+
+    fun runTask(id: ULong) = scheduler.run(id)
+
+    /** Scroll bars over the drawn extent and the view (see InfiniteCanvasEditor.scrollExtent). */
+    fun scrollInfo(out: CPointer<DoubleVar>) {
+        val vp = editor.viewport
+        val ext = editor.scrollExtent()
+        out[0] = (vp.scrollX - ext.left) * vp.zoom
+        out[1] = (vp.scrollY - ext.top) * vp.zoom
+        out[2] = (ext.w * vp.zoom - vp.widthPx).coerceAtLeast(0.0)
+        out[3] = (ext.h * vp.zoom - vp.heightPx).coerceAtLeast(0.0)
+        out[4] = vp.widthPx.toDouble()
+        out[5] = vp.heightPx.toDouble()
+    }
+
+    fun scrollTo(x: Double, y: Double) {
+        val vp = editor.viewport
+        val ext = editor.scrollExtent()
+        editor.scrollBy((ext.left + x / vp.zoom - vp.scrollX) * vp.zoom, (ext.top + y / vp.zoom - vp.scrollY) * vp.zoom)
+    }
+
+    /** The canvas background as a page style: paper, ruling, its colour and spacing. */
+    fun backgroundStyle(o: xn_page_style) {
+        val bg = editor.document.background
+        o.has_page_color = if (bg.paperColor != null) 1 else 0
+        o.page_color = bg.paperColor?.packed() ?: 0u
+        o.pattern = PagePattern.entries.indexOf(bg.pattern)
+        o.has_pattern_color = 1
+        o.pattern_color = bg.patternColor.packed()
+        o.spacing = bg.spacing
+    }
+
+    fun setBackgroundStyle(s: xn_page_style) {
+        val now = editor.document.background
+        editor.setBackground(
+            CanvasBackground(
+                pattern = PagePattern.entries.getOrNull(s.pattern) ?: now.pattern,
+                patternColor = if (s.has_pattern_color != 0) unpack(s.pattern_color) else PageStyle.DEFAULT_PATTERN_COLOR,
+                spacing = s.spacing.takeIf { it > 0.0 }?.coerceIn(PageStyle.MIN_SPACING, PageStyle.MAX_SPACING) ?: PageStyle.DEFAULT_SPACING,
+                paperColor = if (s.has_page_color != 0) unpack(s.page_color) else null,
+            ),
+        )
+    }
+
+    fun dispose() {
+        scheduler.cancelAll()
+        editor.dispose()
+        surfaces.dispose()
+    }
+}
+
+/** Tools the infinite canvas has (no text boxes, flow text or screenshots there). */
+private val CANVAS_TOOLS = setOf(
+    Tool.PEN, Tool.DASHED, Tool.CALLIGRAPHY, Tool.SPEED, Tool.TAPER, Tool.HIGHLIGHTER, Tool.ERASER,
+    Tool.PAN, Tool.SELECT, Tool.LASSO, Tool.SHAPE,
+)
+
+/** The canvas's keyboard and toolbar zoom step. */
+private const val CANVAS_ZOOM_STEP = 1.25
+
+internal fun shapeConfigOf(s: xn_shape_style, current: ShapeConfig): ShapeConfig = current.copy(
+    shape = ShapeKind.entries.firstOrNull { it.id == s.kind?.toKString() } ?: current.shape,
+    strokeWidth = s.width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH),
+    fill = s.fill != 0,
+    fillAlpha = s.fill_alpha.coerceIn(ShapeConfig.FILL_ALPHA_MIN, ShapeConfig.FILL_ALPHA_MAX),
+    dashed = s.dashed != 0,
+)
+
+/** The shared colour (else the first's) and the first width of [styles]; returns how many there are. */
+internal fun writeStyles(styles: List<DrawStyle>, color: CPointer<UIntVar>?, width: CPointer<DoubleVar>?): Int {
+    val first = styles.firstOrNull() ?: return 0
+    val shared = first.color.takeIf { c -> styles.all { it.color == c } } ?: first.color
+    color?.pointed?.value = shared.packed()
+    width?.pointed?.value = first.width
+    return styles.size
+}
+
 private inline fun <T> guard(fallback: T, block: () -> T): T = try {
     block()
 } catch (t: Throwable) {
@@ -523,26 +680,50 @@ private inline fun <T> guard(fallback: T, block: () -> T): T = try {
 
 @CName("xn_editor_create")
 fun xnEditorCreate(note: COpaquePointer?, host: CPointer<xn_host>?): COpaquePointer? = guard(null) {
-    StableRef.create(CEditor(note!!.note(), copyHost(host!!))).asCPointer()
+    val canvas = note!!.canvasNote()
+    if (canvas != null) StableRef.create(CCanvasEditor(canvas, copyHost(host!!))).asCPointer()
+    else StableRef.create(CEditor(note.note(), copyHost(host!!))).asCPointer()
 }
 
 @CName("xn_editor_destroy")
 fun xnEditorDestroy(editor: COpaquePointer?) = guard(Unit) {
     if (editor == null) return@guard
-    val ref = editor.asStableRef<CEditor>()
-    ref.get().dispose()
+    val ref = editor.asStableRef<Any>()
+    when (val e = ref.get()) {
+        is CEditor -> e.dispose()
+        is CCanvasEditor -> e.dispose()
+    }
     ref.dispose()
 }
 
 @CName("xn_editor_set_viewport")
 fun xnEditorSetViewport(editor: COpaquePointer?, width: Int, height: Int, pxPerDp: Double) =
-    guard(Unit) { editor!!.editor().setViewport(width, height, pxPerDp) }
+    guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.setViewport(width, height, pxPerDp)
+        return@guard
+    }
+    editor!!.editor().setViewport(width, height, pxPerDp) }
 
 @CName("xn_editor_paint")
-fun xnEditorPaint(editor: COpaquePointer?, renderer: COpaquePointer?) = guard(Unit) { editor!!.editorQuiet().paint(renderer) }
+fun xnEditorPaint(editor: COpaquePointer?, renderer: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.paint(renderer)
+        return@guard
+    }
+    editor!!.editorQuiet().paint(renderer) }
 
 @CName("xn_editor_frame_damage")
 fun xnEditorFrameDamage(editor: COpaquePointer?, out: CPointer<DoubleVar>?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        val r = c.editor.frameDamage() ?: return@guard 0
+        out!![0] = r.x
+        out[1] = r.y
+        out[2] = r.w
+        out[3] = r.h
+        return@guard 1
+    }
+   
     val rect = editor!!.editorQuiet().frameDamage() ?: return@guard 0
     out!![0] = rect.x
     out[1] = rect.y
@@ -552,7 +733,12 @@ fun xnEditorFrameDamage(editor: COpaquePointer?, out: CPointer<DoubleVar>?): Int
 }
 
 @CName("xn_editor_run_task")
-fun xnEditorRunTask(editor: COpaquePointer?, task: ULong) = guard(Unit) { editor!!.editorQuiet().runTask(task) }
+fun xnEditorRunTask(editor: COpaquePointer?, task: ULong) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.runTask(task)
+        return@guard
+    }
+    editor!!.editorQuiet().runTask(task) }
 
 private fun event(e: xn_pointer_event): SimplePointerEvent {
     fun sample(p: xn_pointer) = PointerSample(p.id, p.x, p.y, p.pressure, p.tool_type)
@@ -565,56 +751,115 @@ private fun event(e: xn_pointer_event): SimplePointerEvent {
 
 @CName("xn_editor_touch")
 fun xnEditorTouch(editor: COpaquePointer?, e: CPointer<xn_pointer_event>?) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.editor.onTouch(event(e!!.pointed))
+        return@guard
+    }
+   
     editor!!.editorQuiet().controller.onTouch(event(e!!.pointed))
 }
 
 @CName("xn_editor_hover")
 fun xnEditorHover(editor: COpaquePointer?, e: CPointer<xn_pointer_event>?) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.editor.onHover(event(e!!.pointed))
+        return@guard
+    }
+   
     editor!!.editorQuiet().controller.onHover(event(e!!.pointed))
 }
 
 @CName("xn_editor_set_tool")
 fun xnEditorSetTool(editor: COpaquePointer?, toolId: String?): Int = guard(0) {
+    editor!!.canvas()?.let { c ->
+        val t = Tool.fromId(toolId)?.takeIf { it in CANVAS_TOOLS } ?: return@guard 0
+        c.editor.tool = t
+        return@guard 1
+    }
+   
     val tool = Tool.entries.firstOrNull { it.id == toolId } ?: return@guard 0
     editor!!.editor().editor.selectTool(tool)
     1
 }
 
 @CName("xn_editor_set_ink_color")
-fun xnEditorSetInkColor(editor: COpaquePointer?, color: UInt) = guard(Unit) { editor!!.editor().controller.pickInk(unpack(color)) }
+fun xnEditorSetInkColor(editor: COpaquePointer?, color: UInt) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.inkColor = unpack(color)
+        return@guard
+    }
+    editor!!.editor().controller.pickInk(unpack(color)) }
 
 @CName("xn_editor_undo")
 fun xnEditorUndo(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.undo()
+        return@guard
+    }
+   
     val e = editor!!.editor()
     if (e.history.canUndo) e.editor.undo()
 }
 
 @CName("xn_editor_redo")
 fun xnEditorRedo(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.redo()
+        return@guard
+    }
+   
     val e = editor!!.editor()
     if (e.history.canRedo) e.editor.redo()
 }
 
 @CName("xn_editor_can_undo")
-fun xnEditorCanUndo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().history.canUndo) 1 else 0 }
+fun xnEditorCanUndo(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard if (c.editor.history.canUndo) 1 else 0
+    }
+    if (editor!!.editorQuiet().history.canUndo) 1 else 0 }
 
 @CName("xn_editor_can_redo")
-fun xnEditorCanRedo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().history.canRedo) 1 else 0 }
+fun xnEditorCanRedo(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard if (c.editor.history.canRedo) 1 else 0
+    }
+    if (editor!!.editorQuiet().history.canRedo) 1 else 0 }
 
 @CName("xn_editor_escape")
-fun xnEditorEscape(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.escape() }
+fun xnEditorEscape(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.escape()
+        return@guard
+    }
+    editor!!.editor().controller.escape() }
 
 @CName("xn_editor_delete_selection")
-fun xnEditorDeleteSelection(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.deleteSelection() }
+fun xnEditorDeleteSelection(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.deleteSelection()
+        return@guard
+    }
+    editor!!.editor().controller.deleteSelection() }
 
 @CName("xn_editor_zoom_step")
 fun xnEditorZoomStep(editor: COpaquePointer?, zoomIn: Int) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.zoomBy(if (zoomIn != 0) CANVAS_ZOOM_STEP else 1.0 / CANVAS_ZOOM_STEP)
+        return@guard
+    }
+   
     val e = editor!!.editor().editor
     if (zoomIn != 0) e.zoomIn() else e.zoomOut()
 }
 
 @CName("xn_editor_zoom_at")
 fun xnEditorZoomAt(editor: COpaquePointer?, x: Double, y: Double, factor: Double) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.zoomAt(x, y, factor)
+        return@guard
+    }
+   
     val e = editor!!.editor()
     e.state.setZoomAnchored(Pt(x, y), e.state.zoom * factor)
     e.viewChanged()
@@ -622,6 +867,11 @@ fun xnEditorZoomAt(editor: COpaquePointer?, x: Double, y: Double, factor: Double
 
 @CName("xn_editor_scroll_by")
 fun xnEditorScrollBy(editor: COpaquePointer?, dx: Double, dy: Double) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.scrollBy(dx, dy)
+        return@guard
+    }
+   
     val e = editor!!.editor()
     e.state.scrollBy(dx, dy)
     e.viewChanged()
@@ -629,6 +879,11 @@ fun xnEditorScrollBy(editor: COpaquePointer?, dx: Double, dy: Double) = guard(Un
 
 @CName("xn_editor_scroll_info")
 fun xnEditorScrollInfo(editor: COpaquePointer?, out: CPointer<DoubleVar>?) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.scrollInfo(out!!)
+        return@guard
+    }
+   
     val st = editor!!.editorQuiet().state
     out!![0] = st.scrollX
     out[1] = st.scrollY
@@ -640,30 +895,58 @@ fun xnEditorScrollInfo(editor: COpaquePointer?, out: CPointer<DoubleVar>?) = gua
 
 @CName("xn_editor_scroll_to")
 fun xnEditorScrollTo(editor: COpaquePointer?, x: Double, y: Double) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.scrollTo(x, y)
+        return@guard
+    }
+   
     val e = editor!!.editor()
     e.state.scrollBy(x - e.state.scrollX, y - e.state.scrollY)
     e.viewChanged()
 }
 
 @CName("xn_editor_fit_width")
-fun xnEditorFitWidth(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().editor.fitWidth() }
+fun xnEditorFitWidth(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.zoomToFit()
+        return@guard
+    }
+    editor!!.editor().editor.fitWidth() }
 
 @CName("xn_editor_go_to_page")
 fun xnEditorGoToPage(editor: COpaquePointer?, index: Int) = guard(Unit) { editor!!.editor().editor.goToPage(index) }
 
 @CName("xn_editor_current_page")
-fun xnEditorCurrentPage(editor: COpaquePointer?): Int = guard(0) { editor!!.editorQuiet().state.currentPageIndex() }
+fun xnEditorCurrentPage(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard 0
+    }
+    editor!!.editorQuiet().state.currentPageIndex() }
 
 @CName("xn_editor_zoom")
-fun xnEditorZoom(editor: COpaquePointer?): Double = guard(1.0) { editor!!.editorQuiet().state.zoom }
+fun xnEditorZoom(editor: COpaquePointer?): Double = guard(1.0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard c.editor.viewport.zoom
+    }
+    editor!!.editorQuiet().state.zoom }
 
 @CName("xn_editor_set_palette")
 fun xnEditorSetPalette(editor: COpaquePointer?, palette: CPointer<xn_palette>?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.palette = CPalette(palette!!.pointed)
+        return@guard
+    }
+   
     editor!!.editor().setPalette(CPalette(palette!!.pointed))
 }
 
 @CName("xn_editor_page_style")
 fun xnEditorPageStyle(editor: COpaquePointer?, allPages: Int, out: CPointer<xn_page_style>?) = guard(Unit) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        c.backgroundStyle(out!!.pointed)
+        return@guard
+    }
+   
     val e = editor!!.editorQuiet().editor
     val st = if (allPages != 0) e.documentStyle else e.currentPageStyle
     val o = out!!.pointed
@@ -677,6 +960,11 @@ fun xnEditorPageStyle(editor: COpaquePointer?, allPages: Int, out: CPointer<xn_p
 
 @CName("xn_editor_set_page_style")
 fun xnEditorSetPageStyle(editor: COpaquePointer?, allPages: Int, style: CPointer<xn_page_style>?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.setBackgroundStyle(style!!.pointed)
+        return@guard
+    }
+   
     val s = style!!.pointed
     val next = PageStyle(
         pageColor = if (s.has_page_color != 0) unpack(s.page_color) else null,
@@ -702,16 +990,30 @@ private val toolNames = HashMap<Tool, CPointer<ByteVar>>()
 private fun toolName(t: Tool): CPointer<ByteVar>? = toolNames.getOrPut(t) { strdup(t.id)!! }
 
 @CName("xn_editor_tool")
-fun xnEditorTool(editor: COpaquePointer?): CPointer<ByteVar>? = guard(null) { toolName(editor!!.editorQuiet().controller.tool) }
+fun xnEditorTool(editor: COpaquePointer?): CPointer<ByteVar>? = guard(null) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard toolName(c.editor.tool)
+    }
+    toolName(editor!!.editorQuiet().controller.tool) }
 
 @CName("xn_editor_tool_width")
 fun xnEditorToolWidth(editor: COpaquePointer?, toolId: String?): Double = guard(0.0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard c.editor.toolConfig(Tool.fromId(toolId) ?: return@guard 0.0).baseWidth
+    }
+   
     val tool = Tool.fromId(toolId) ?: return@guard 0.0
     editor!!.editorQuiet().controller.configFor(tool).baseWidth
 }
 
 @CName("xn_editor_set_tool_width")
 fun xnEditorSetToolWidth(editor: COpaquePointer?, toolId: String?, width: Double) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        val t = Tool.fromId(toolId) ?: return@guard
+        c.editor.setToolConfig(t, c.editor.toolConfig(t).copy(baseWidth = width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH)))
+        return@guard
+    }
+   
     val tool = Tool.fromId(toolId) ?: return@guard
     val c = editor!!.editor().controller
     c.setToolConfig(tool, c.configFor(tool).copy(baseWidth = width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH)))
@@ -719,27 +1021,33 @@ fun xnEditorSetToolWidth(editor: COpaquePointer?, toolId: String?, width: Double
 
 @CName("xn_editor_erase_mode")
 fun xnEditorEraseMode(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard if (c.editor.toolConfig(Tool.ERASER).eraseMode == EraseMode.AREA) 1 else 0
+    }
+   
     if (editor!!.editorQuiet().controller.configFor(Tool.ERASER).eraseMode == EraseMode.AREA) 1 else 0
 }
 
 @CName("xn_editor_set_erase_mode")
 fun xnEditorSetEraseMode(editor: COpaquePointer?, mode: Int) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.setToolConfig(Tool.ERASER, c.editor.toolConfig(Tool.ERASER).copy(eraseMode = if (mode == 1) EraseMode.AREA else EraseMode.STROKE))
+        return@guard
+    }
+   
     val c = editor!!.editor().controller
     c.setToolConfig(Tool.ERASER, c.configFor(Tool.ERASER).copy(eraseMode = if (mode == 1) EraseMode.AREA else EraseMode.STROKE))
 }
 
 @CName("xn_editor_set_shape_style")
 fun xnEditorSetShapeStyle(editor: COpaquePointer?, style: CPointer<xn_shape_style>?) = guard(Unit) {
-    val s = style!!.pointed
+    editor!!.canvas()?.let { c ->
+        c.editor.shapeConfig = shapeConfigOf(style!!.pointed, c.editor.shapeConfig)
+        return@guard
+    }
+   
     val c = editor!!.editor().controller
-    val kind = ShapeKind.entries.firstOrNull { it.id == s.kind?.toKString() } ?: c.shapeConfig.shape
-    c.shapeConfig = c.shapeConfig.copy(
-        shape = kind,
-        strokeWidth = s.width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH),
-        fill = s.fill != 0,
-        fillAlpha = s.fill_alpha.coerceIn(ShapeConfig.FILL_ALPHA_MIN, ShapeConfig.FILL_ALPHA_MAX),
-        dashed = s.dashed != 0,
-    )
+    c.shapeConfig = shapeConfigOf(style!!.pointed, c.shapeConfig)
 }
 
 internal fun fillField(f: xn_text_field, field: EditingField) {
@@ -794,6 +1102,13 @@ fun xnEditorRefreshBackgrounds(editor: COpaquePointer?) = guard(Unit) {
 
 @CName("xn_editor_insert_image")
 fun xnEditorInsertImage(editor: COpaquePointer?, path: String?, atPoint: Int, x: Double, y: Double): Int = guard(0) {
+    editor!!.canvas()?.let { c ->
+        val size = c.images.probeFile(path ?: return@guard 0) ?: return@guard 0
+        if (size.width <= 0 || size.height <= 0) return@guard 0
+        c.editor.insertImage(fileOf(path), size.width, size.height, if (atPoint != 0) c.editor.viewport.viewportToContent(Pt(x, y)) else null)
+        return@guard 1
+    }
+   
     val e = editor!!.editor()
     val size = e.images.probeFile(path ?: return@guard 0) ?: return@guard 0
     if (size.width <= 0 || size.height <= 0) return@guard 0
@@ -803,10 +1118,23 @@ fun xnEditorInsertImage(editor: COpaquePointer?, path: String?, atPoint: Int, x:
 }
 
 @CName("xn_editor_has_selection")
-fun xnEditorHasSelection(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().controller.hasSelection) 1 else 0 }
+fun xnEditorHasSelection(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard if (c.editor.hasSelection) 1 else 0
+    }
+    if (editor!!.editorQuiet().controller.hasSelection) 1 else 0 }
 
 @CName("xn_editor_selection_rect")
 fun xnEditorSelectionRect(editor: COpaquePointer?, out: CPointer<DoubleVar>?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        val r = c.editor.selectionMenuRect() ?: return@guard 0
+        out!![0] = r.x
+        out[1] = r.y
+        out[2] = r.w
+        out[3] = r.h
+        return@guard 1
+    }
+   
     val rect = editor!!.editorQuiet().controller.selectionMenuRect() ?: return@guard 0
     out!![0] = rect.x
     out[1] = rect.y
@@ -816,25 +1144,60 @@ fun xnEditorSelectionRect(editor: COpaquePointer?, out: CPointer<DoubleVar>?): I
 }
 
 @CName("xn_editor_select_all")
-fun xnEditorSelectAll(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.selectAll() }
+fun xnEditorSelectAll(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.selectAll()
+        return@guard
+    }
+    editor!!.editor().controller.selectAll() }
 
 @CName("xn_editor_cut")
-fun xnEditorCut(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.cutSelection() }
+fun xnEditorCut(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.cutSelection()
+        return@guard
+    }
+    editor!!.editor().controller.cutSelection() }
 
 @CName("xn_editor_copy")
-fun xnEditorCopy(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.copySelection() }
+fun xnEditorCopy(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.copySelection()
+        return@guard
+    }
+    editor!!.editor().controller.copySelection() }
 
 @CName("xn_editor_duplicate")
-fun xnEditorDuplicate(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.duplicateSelection() }
+fun xnEditorDuplicate(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.duplicateSelection()
+        return@guard
+    }
+    editor!!.editor().controller.duplicateSelection() }
 
 @CName("xn_editor_bring_to_front")
-fun xnEditorBringToFront(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.bringToFront() }
+fun xnEditorBringToFront(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.bringToFront()
+        return@guard
+    }
+    editor!!.editor().controller.bringToFront() }
 
 @CName("xn_editor_lock_selection")
-fun xnEditorLockSelection(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.lockSelection() }
+fun xnEditorLockSelection(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.lockSelection()
+        return@guard
+    }
+    editor!!.editor().controller.lockSelection() }
 
 @CName("xn_editor_unlock_pressed")
 fun xnEditorUnlockPressed(editor: COpaquePointer?) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.unlockPressed()
+        return@guard
+    }
+   
     val e = editor!!.editor()
     val item = e.pressedLocked ?: return@guard
     e.pressedLocked = null
@@ -844,27 +1207,41 @@ fun xnEditorUnlockPressed(editor: COpaquePointer?) = guard(Unit) {
 }
 
 @CName("xn_editor_can_paste")
-fun xnEditorCanPaste(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().controller.hasClipboardItems()) 1 else 0 }
+fun xnEditorCanPaste(editor: COpaquePointer?): Int = guard(0) {
+    editor!!.canvas(quiet = true)?.let { c ->
+        return@guard if (c.editor.canPaste) 1 else 0
+    }
+    if (editor!!.editorQuiet().controller.hasClipboardItems()) 1 else 0 }
 
 @CName("xn_editor_paste_at")
 fun xnEditorPasteAt(editor: COpaquePointer?, x: Double, y: Double) = guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.pasteAt(c.editor.viewport.viewportToContent(Pt(x, y)))
+        return@guard
+    }
+   
     val e = editor!!.editor()
     e.controller.pasteItemsAt(e.state.viewportToContent(Pt(x, y)))
 }
 
 @CName("xn_editor_selection_style")
 fun xnEditorSelectionStyle(editor: COpaquePointer?, color: CPointer<UIntVar>?, width: CPointer<DoubleVar>?): Int = guard(0) {
-    val styles = editor!!.editorQuiet().controller.selectionStyles()
-    val first = styles.firstOrNull() ?: return@guard 0
-    val shared = first.color.takeIf { c -> styles.all { it.color == c } } ?: first.color
-    color?.pointed?.value = shared.packed()
-    width?.pointed?.value = first.width
-    styles.size
+    editor!!.canvas(quiet = true)?.let { c ->
+        val styles = c.editor.selectionStyles()
+        return@guard writeStyles(styles, color, width)
+    }
+   
+    writeStyles(editor!!.editorQuiet().controller.selectionStyles(), color, width)
 }
 
 @CName("xn_editor_restyle_selection")
 fun xnEditorRestyleSelection(editor: COpaquePointer?, setColor: Int, color: UInt, setWidth: Int, width: Double, preview: Int) =
     guard(Unit) {
+    editor!!.canvas()?.let { c ->
+        c.editor.restyleSelection(if (setColor != 0) unpack(color) else null, if (setWidth != 0) width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH) else null, preview != 0)
+        return@guard
+    }
+   
         editor!!.editor().controller.restyleSelection(
             if (setColor != 0) unpack(color) else null,
             if (setWidth != 0) width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH) else null,

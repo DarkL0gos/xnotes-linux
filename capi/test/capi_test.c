@@ -612,6 +612,103 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* v2: an infinite canvas. */
+    {
+        xn_note* canvas = xn_canvas_new();
+        CHECK(canvas && xn_note_is_canvas(canvas) == 1 && xn_note_is_canvas(note) == 0, "a canvas is a canvas");
+        CHECK(xn_note_page_count(canvas) == 0 && xn_note_item_count(canvas, 0) == 0, "no pages, no items");
+        xn_editor* ce = xn_editor_create(canvas, &host);
+        CHECK(ce != NULL, "canvas editor");
+        xn_editor_set_viewport(ce, 800, 600, 1.0);
+        CHECK(xn_editor_zoom(ce) == 1.0, "an empty canvas opens at 100%%");
+        memset(&hs.screen, 0, sizeof hs.screen);
+        memset(&hs.offscreen, 0, sizeof hs.offscreen);
+        xn_editor_paint(ce, &hs.screen_target);
+        CHECK(hs.offscreen.fills > 0 && hs.screen.surfaces == 1, "paper and ruling, composed and copied out");
+        CHECK(xn_editor_set_tool(ce, "text_box") == 0 && xn_editor_set_tool(ce, "pen") == 1, "canvas tools");
+        xn_editor_set_ink_color(ce, 0x2050A0FFu);
+        int64_t ct = 50000;
+        pen(ce, XN_ACTION_DOWN, 100, 300, ct, 0, NULL, NULL);
+        xn_editor_paint(ce, &hs.screen_target);
+        int partial = 0;
+        double dmg2[4];
+        for (int i = 1; i <= 60; i++) {
+            pen(ce, XN_ACTION_MOVE, 100 + i * 8, 300 + (i % 7) * 3, ct + i * 4, 0, NULL, NULL);
+            if (xn_editor_frame_damage(ce, dmg2) && dmg2[2] < 300) partial++;
+            xn_editor_paint(ce, &hs.screen_target);
+        }
+        pen(ce, XN_ACTION_UP, 580, 300, ct + 260, 0, NULL, NULL);
+        CHECK(partial > 50, "writing on the canvas repaints around the pen (%d partial frames)", partial);
+        CHECK(xn_note_item_count(canvas, 0) == 1 && xn_note_is_dirty(canvas), "a stroke on the canvas");
+        CHECK(xn_editor_frame_damage(ce, dmg2) == 0, "filing it repaints in full");
+        memset(&hs.screen, 0, sizeof hs.screen);
+        memset(&hs.offscreen, 0, sizeof hs.offscreen);
+        xn_editor_paint(ce, &hs.screen_target);
+        CHECK(hs.screen.surfaces > 0 && hs.offscreen.ribbons > 0, "the ink comes from tiles (%d tiles, %d ribbons)",
+              hs.screen.surfaces, hs.offscreen.ribbons);
+        /* Panning reuses the tiles in view. */
+        memset(&hs.offscreen, 0, sizeof hs.offscreen);
+        xn_editor_scroll_by(ce, 40, 0);
+        xn_editor_paint(ce, &hs.screen_target);
+        CHECK(hs.offscreen.ribbons == 0, "a small pan renders no ink again");
+
+        xn_editor_select_all(ce);
+        CHECK(xn_editor_has_selection(ce) == 1, "select all on the canvas");
+        double cr[4];
+        CHECK(xn_editor_selection_rect(ce, cr) == 1 && cr[2] > 0, "its menu rect");
+        xn_editor_duplicate(ce);
+        CHECK(xn_note_item_count(canvas, 0) == 2, "duplicated");
+        xn_editor_undo(ce);
+        CHECK(xn_note_item_count(canvas, 0) == 1, "undo on the canvas");
+
+        xn_editor_set_tool(ce, "eraser");
+        xn_editor_set_erase_mode(ce, XN_ERASE_STROKE);
+        pen(ce, XN_ACTION_DOWN, 300, 250, ct + 400, 0, NULL, NULL);
+        for (int i = 1; i <= 20; i++) pen(ce, XN_ACTION_MOVE, 300, 250 + i * 5, ct + 400 + i * 4, 0, NULL, NULL);
+        pen(ce, XN_ACTION_UP, 300, 350, ct + 500, 0, NULL, NULL);
+        CHECK(xn_note_item_count(canvas, 0) == 0, "erased on the canvas");
+        xn_editor_undo(ce);
+        CHECK(xn_note_item_count(canvas, 0) == 1, "and back");
+
+        xn_page_style bgs;
+        xn_editor_page_style(ce, 1, &bgs);
+        CHECK(bgs.pattern == XN_PATTERN_GRID, "a canvas starts on a grid");
+        xn_page_style dots = {1, 0xFFFFFFFFu, XN_PATTERN_DOTS, 1, 0x80808060u, 32};
+        xn_editor_set_page_style(ce, 1, &dots);
+        xn_editor_page_style(ce, 1, &bgs);
+        CHECK(bgs.pattern == XN_PATTERN_DOTS && bgs.spacing == 32 && bgs.page_color == 0xFFFFFFFFu, "canvas background");
+
+        double z = xn_editor_zoom(ce);
+        xn_editor_zoom_step(ce, 1);
+        CHECK(xn_editor_zoom(ce) > z, "zoom in");
+        double sc2[6];
+        xn_editor_scroll_info(ce, sc2);
+        CHECK(sc2[2] > 0 && sc2[3] > 0 && sc2[4] == 800, "scroll bars over the canvas");
+        xn_editor_add_page(ce);           /* page commands do nothing on a canvas */
+        xn_editor_go_to_page(ce, 3);
+        xn_text_field nofield;
+        CHECK(xn_editor_text_field(ce, &nofield) == 0, "no text boxes");
+
+        char cpath[1024];
+        snprintf(cpath, sizeof cpath, "%s/board.xcanvas", argv[1]);
+        CHECK(xn_note_save(canvas, cpath, &host, &err) == 1, "save the canvas: %s", err ? err : "");
+        CHECK(xn_note_is_dirty(canvas) == 0, "saved");
+        xn_editor_destroy(ce);
+        xn_note_close(canvas);
+        xn_note* back2 = xn_note_open(cpath, argv[1], &host, &err);
+        CHECK(back2 && xn_note_is_canvas(back2) && xn_note_item_count(back2, 0) == 1, "reopened the canvas");
+        if (back2) {
+            xn_editor* be = xn_editor_create(back2, &host);
+            xn_editor_set_viewport(be, 800, 600, 1.0);
+            xn_editor_page_style(be, 1, &bgs);
+            CHECK(bgs.pattern == XN_PATTERN_DOTS, "with its background");
+            xn_editor_paint(be, &hs.screen_target);
+            xn_editor_destroy(be);
+            xn_note_close(back2);
+        }
+        CHECK(hs.surfaces_live == 0, "canvas tiles all released (%d live)", hs.surfaces_live);
+    }
+
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;
