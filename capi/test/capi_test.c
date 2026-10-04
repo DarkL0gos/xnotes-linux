@@ -433,6 +433,36 @@ int main(int argc, char** argv) {
     CHECK(sc[1] == sc[3], "scrolling is clamped");
     xn_editor_scroll_to(ed, 0, 0);
 
+    /* v2: eraser mode and size. A stroke across the page; an area eraser crossing its middle
+       cuts it in two, a stroke eraser removes it. */
+    CHECK(xn_editor_erase_mode(ed) == XN_ERASE_STROKE, "the eraser takes whole strokes by default");
+    CHECK(xn_editor_tool_width(ed, "eraser") == 24.0, "eraser radius 24");
+    int before = xn_note_item_count(note, page);
+    xn_editor_set_tool(ed, "pen");
+    pen(ed, XN_ACTION_DOWN, 150, 850, t + 900, 0, NULL, NULL);
+    for (int i = 1; i <= 40; i++) pen(ed, XN_ACTION_MOVE, 150 + i * 12, 850, t + 900 + i * 4, 0, NULL, NULL);
+    pen(ed, XN_ACTION_UP, 630, 850, t + 1070, 0, NULL, NULL);
+    CHECK(xn_note_item_count(note, page) == before + 1, "a stroke to erase");
+    xn_editor_set_erase_mode(ed, XN_ERASE_AREA);
+    CHECK(xn_editor_erase_mode(ed) == XN_ERASE_AREA, "area mode");
+    xn_editor_set_tool_width(ed, "eraser", 10);
+    xn_editor_set_tool(ed, "eraser");
+    pen(ed, XN_ACTION_DOWN, 390, 820, t + 1100, 0, NULL, NULL);
+    for (int i = 1; i <= 12; i++) pen(ed, XN_ACTION_MOVE, 390, 820 + i * 5, t + 1100 + i * 4, 0, NULL, NULL);
+    pen(ed, XN_ACTION_UP, 390, 880, t + 1160, 0, NULL, NULL);
+    CHECK(xn_note_item_count(note, page) == before + 2, "an area eraser splits the stroke (%d)", xn_note_item_count(note, page) - before);
+    xn_editor_set_erase_mode(ed, XN_ERASE_STROKE);
+    pen(ed, XN_ACTION_DOWN, 250, 820, t + 1200, 0, NULL, NULL);
+    for (int i = 1; i <= 12; i++) pen(ed, XN_ACTION_MOVE, 250, 820 + i * 5, t + 1200 + i * 4, 0, NULL, NULL);
+    pen(ed, XN_ACTION_UP, 250, 880, t + 1260, 0, NULL, NULL);
+    CHECK(xn_note_item_count(note, page) == before + 1, "a stroke eraser removes the piece it touched");
+    xn_editor_undo(ed);
+    xn_editor_undo(ed);
+    xn_editor_undo(ed);
+    CHECK(xn_note_item_count(note, page) == before, "undone");
+    xn_editor_set_tool_width(ed, "eraser", 24);
+    xn_editor_set_tool(ed, "pen");
+
     /* v2: page style. */
     xn_page_style ps;
     xn_editor_page_style(ed, 1, &ps);

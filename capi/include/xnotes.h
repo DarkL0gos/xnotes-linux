@@ -292,6 +292,12 @@ const char* xn_editor_tool(const xn_editor* editor);
 double xn_editor_tool_width(const xn_editor* editor, const char* tool_id);
 void xn_editor_set_tool_width(xn_editor* editor, const char* tool_id, double width);
 
+/* The eraser removes whole strokes it touches, or only the ink under it. Its size is its radius
+   in page pixels, set as its width (1..80, 24 by default). */
+enum { XN_ERASE_STROKE = 0, XN_ERASE_AREA = 1 };
+int xn_editor_erase_mode(const xn_editor* editor);
+void xn_editor_set_erase_mode(xn_editor* editor, int mode);
+
 /* What the "shape" tool draws. kind: "line", "arrow", "rectangle", "ellipse", "circle", "triangle". */
 typedef struct xn_shape_style {
     const char* kind;

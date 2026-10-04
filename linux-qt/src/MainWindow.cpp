@@ -76,7 +76,8 @@ const QList<QColor> kSwatches = {
 };
 
 /* Tools whose ink width the toolbar sets. */
-bool hasWidth(const QByteArray& tool) { return tool == "pen" || tool == "highlighter" || tool == "shape"; }
+/* Tools whose ink width (the eraser: its radius) the toolbar sets. */
+bool hasWidth(const QByteArray& tool) { return tool == "pen" || tool == "highlighter" || tool == "shape" || tool == "eraser"; }
 
 QString takeError(char* error) {
     QString message = error ? QString::fromUtf8(error) : QStringLiteral("неизвестная ошибка");
@@ -237,7 +238,8 @@ void MainWindow::buildUi() {
     });
     tools->addSeparator();
 
-    widthActions_ << tools->addWidget(new QLabel(QStringLiteral(" Толщина "), this));
+    widthLabel_ = new QLabel(this);
+    widthActions_ << tools->addWidget(widthLabel_);
     width_ = new QDoubleSpinBox(this);
     width_->setRange(XN_STYLE_MIN_WIDTH, XN_STYLE_MAX_WIDTH);
     width_->setSingleStep(0.5);
@@ -251,6 +253,17 @@ void MainWindow::buildUi() {
         else if (auto* e = canvas_->editor()) xn_editor_set_tool_width(e, tool.constData(), w);
     });
     widthActions_ << tools->addWidget(width_);
+
+    // The eraser: whole strokes or just the ink under it.
+    eraseMode_ = new QComboBox(this);
+    eraseMode_->addItem(QStringLiteral("Штрих целиком"), int(XN_ERASE_STROKE));
+    eraseMode_->addItem(QStringLiteral("Область"), int(XN_ERASE_AREA));
+    eraseMode_->setToolTip(QStringLiteral("Ластик стирает касающиеся штрихи целиком или только то, что под ним"));
+    eraseMode_->setFocusPolicy(Qt::ClickFocus);
+    connect(eraseMode_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* e = canvas_->editor()) xn_editor_set_erase_mode(e, eraseMode_->currentData().toInt());
+    });
+    eraserActions_ << tools->addWidget(eraseMode_);
 
     // Text box style: the box being edited or selected, and the next one.
     face_ = new QComboBox(this);
@@ -323,10 +336,14 @@ void MainWindow::syncWidth() {
     const QByteArray tool = currentTool();
     for (QAction* a : std::as_const(widthActions_)) a->setVisible(tool != "text_box");
     for (QAction* a : std::as_const(textActions_)) a->setVisible(tool == "text_box");
+    for (QAction* a : std::as_const(eraserActions_)) a->setVisible(tool == "eraser");
     width_->setEnabled(hasWidth(tool));
+    widthLabel_->setText(tool == "eraser" ? QStringLiteral(" Размер ") : QStringLiteral(" Толщина "));
     if (!hasWidth(tool)) return;
     double w = widths_.value(tool, 0);
     if (w <= 0) w = tool == "shape" ? 3.0 : canvas_->editor() ? xn_editor_tool_width(canvas_->editor(), tool.constData()) : 3.0;
+    // The eraser's radius runs to 80, as on Android; the pens' to their own limit.
+    width_->setMaximum(tool == "eraser" ? 80.0 : XN_STYLE_MAX_WIDTH);
     syncingWidth_ = true;
     width_->setValue(w);
     syncingWidth_ = false;
@@ -346,6 +363,7 @@ void MainWindow::applyToolSettings() {
     for (auto it = widths_.cbegin(); it != widths_.cend(); ++it)
         if (it.key() != "shape") xn_editor_set_tool_width(e, it.key().constData(), it.value());
     applyShape();
+    xn_editor_set_erase_mode(e, eraseMode_->currentData().toInt());
     xn_editor_set_text_face(e, face_->currentData().toByteArray().constData());
     xn_editor_set_text_size(e, textSize_->value());
 }

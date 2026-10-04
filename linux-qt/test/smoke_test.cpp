@@ -10,6 +10,8 @@
 #include "PageStylePopup.h"
 
 #include <QAbstractButton>
+#include <QComboBox>
+#include <QDoubleSpinBox>
 
 #include <QScrollBar>
 #include <QNativeGestureEvent>
@@ -743,6 +745,54 @@ private slots:
 
         canvas.setNote(nullptr);
         xn_note_close(note);
+    }
+
+    /* The toolbar's eraser controls: size and mode, used by the eraser tool. */
+    void eraserControls() {
+        MainWindow window;
+        window.newNote();
+        window.resize(2400, 900);  // the whole toolbar in view
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* canvas = window.findChild<CanvasWidget*>();
+        auto action = [&](const QString& text) {
+            for (QAction* a : window.findChildren<QAction*>())
+                if (a->text() == text) return a;
+            return static_cast<QAction*>(nullptr);
+        };
+        QComboBox* mode = nullptr;
+        for (QComboBox* c : window.findChildren<QComboBox*>())
+            if (c->findText(QStringLiteral("Область")) >= 0) mode = c;
+        QVERIFY(mode);
+        QDoubleSpinBox* size = window.findChild<QDoubleSpinBox*>();
+
+        action(QStringLiteral("Перо"))->trigger();
+        QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(300, 400));
+        for (int i = 1; i <= 40; i++) QTest::mouseMove(canvas, QPoint(300 + i * 10, 400));
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, QPoint(700, 400));
+        QCOMPARE(xn_note_item_count(window.note(), 0), 1);
+
+        action(QStringLiteral("Ластик"))->trigger();
+        QCOMPARE(QByteArray(xn_editor_tool(canvas->editor())), QByteArray("eraser"));
+        QTest::qWait(50);  // the toolbar lays out its shown widgets on the next pass
+        QVERIFY(mode->isVisibleTo(&window));
+        QCOMPARE(size->value(), 24.0);
+        QCOMPARE(size->maximum(), 80.0);
+        mode->setCurrentIndex(mode->findText(QStringLiteral("Область")));
+        QCOMPARE(xn_editor_erase_mode(canvas->editor()), int(XN_ERASE_AREA));
+        size->setValue(8);
+        QCOMPARE(xn_editor_tool_width(canvas->editor(), "eraser"), 8.0);
+        QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(500, 370));
+        for (int i = 1; i <= 12; i++) QTest::mouseMove(canvas, QPoint(500, 370 + i * 5));
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, QPoint(500, 430));
+        QCOMPARE(xn_note_item_count(window.note(), 0), 2);  // cut in two
+
+        action(QStringLiteral("Перо"))->trigger();
+        QTest::qWait(50);
+        QVERIFY(!mode->isVisibleTo(&window));
+        QVERIFY(size->value() != 8.0);  // the pen keeps its own width
+        xn_note* n = window.note();
+        QVERIFY(xn_note_is_dirty(n));
     }
 
     void eraserEndErases() {

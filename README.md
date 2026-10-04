@@ -75,7 +75,7 @@ undoes it.
 - [x] Core as a Kotlin Multiplatform library (`.xnote` format, stroke engine, canvas, editing)
 - [x] C API and `libxnotes.so`
 - [x] Qt app: pen pressure, tablet eraser and barrel buttons, mouse, touch, touchpad pinch
-- [x] Pen, highlighter, eraser, lasso and selection with its action bar, undo/redo, pages
+- [x] Pen, highlighter, eraser (whole strokes or area, sized), lasso and selection with its action bar, undo/redo, pages
 - [x] Text boxes and images
 - [x] Page background: paper colour and ruling (lines, dots, grid) for the note or one page
 - [x] PDF import with background rendering, PDF export

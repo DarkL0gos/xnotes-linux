@@ -29,6 +29,7 @@ public:
     /* Open path; on failure shows why and keeps the current note. */
     bool open(const QString& path);
     void newNote();
+    xn_note* note() const { return note_; }
 
 protected:
     void closeEvent(QCloseEvent* e) override;
@@ -54,6 +55,9 @@ private:
     QSpinBox* textSize_;
     QList<QAction*> widthActions_;
     QList<QAction*> textActions_;
+    QList<QAction*> eraserActions_;
+    QLabel* widthLabel_;
+    QComboBox* eraseMode_;
     bool syncingWidth_ = false;
     QHash<QByteArray, double> widths_;
     QByteArray shapeKind_ = "rectangle";

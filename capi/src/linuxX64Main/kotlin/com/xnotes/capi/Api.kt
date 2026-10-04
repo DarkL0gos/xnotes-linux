@@ -19,6 +19,7 @@ import com.xnotes.canvas.EditingField
 import com.xnotes.core.pal.FontFace
 import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.memScoped
+import com.xnotes.core.tools.EraseMode
 import com.xnotes.core.tools.ShapeConfig
 import kotlinx.cinterop.DoubleVar
 import kotlinx.cinterop.UIntVar
@@ -714,6 +715,17 @@ fun xnEditorSetToolWidth(editor: COpaquePointer?, toolId: String?, width: Double
     val tool = Tool.fromId(toolId) ?: return@guard
     val c = editor!!.editor().controller
     c.setToolConfig(tool, c.configFor(tool).copy(baseWidth = width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH)))
+}
+
+@CName("xn_editor_erase_mode")
+fun xnEditorEraseMode(editor: COpaquePointer?): Int = guard(0) {
+    if (editor!!.editorQuiet().controller.configFor(Tool.ERASER).eraseMode == EraseMode.AREA) 1 else 0
+}
+
+@CName("xn_editor_set_erase_mode")
+fun xnEditorSetEraseMode(editor: COpaquePointer?, mode: Int) = guard(Unit) {
+    val c = editor!!.editor().controller
+    c.setToolConfig(Tool.ERASER, c.configFor(Tool.ERASER).copy(eraseMode = if (mode == 1) EraseMode.AREA else EraseMode.STROKE))
 }
 
 @CName("xn_editor_set_shape_style")
