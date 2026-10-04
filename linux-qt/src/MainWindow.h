@@ -13,7 +13,7 @@
 
 class CanvasWidget;
 class QComboBox;
-class QDoubleSpinBox;
+class QSlider;
 class QSpinBox;
 class QLabel;
 class QScrollBar;
@@ -50,7 +50,8 @@ private:
     bool dark_ = true;
     SelectionBar* selectionBar_;
     QPointer<PageStylePopup> pageStyle_;
-    QDoubleSpinBox* width_;
+    QSlider* width_;
+    QLabel* widthValue_;
     QComboBox* face_;
     QSpinBox* textSize_;
     QList<QAction*> widthActions_;

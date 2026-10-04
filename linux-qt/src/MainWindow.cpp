@@ -19,7 +19,7 @@
 #include <QMimeData>
 #include <QUuid>
 #include <QComboBox>
-#include <QDoubleSpinBox>
+#include <QSlider>
 #include <QSpinBox>
 #include <QMenu>
 #include <QToolButton>
@@ -76,6 +76,13 @@ const QList<QColor> kSwatches = {
 };
 
 /* Tools whose ink width the toolbar sets. */
+/* The width slider's range per tool, as on Android (ToolDefaults.widthRange); the eraser's is its radius. */
+std::pair<double, double> widthRange(const QByteArray& tool) {
+    if (tool == "highlighter") return {4.0, 40.0};
+    if (tool == "eraser") return {1.0, 80.0};
+    return {1.0, 20.0};
+}
+
 /* Tools whose ink width (the eraser: its radius) the toolbar sets. */
 bool hasWidth(const QByteArray& tool) { return tool == "pen" || tool == "highlighter" || tool == "shape" || tool == "eraser"; }
 
@@ -240,19 +247,22 @@ void MainWindow::buildUi() {
 
     widthLabel_ = new QLabel(this);
     widthActions_ << tools->addWidget(widthLabel_);
-    width_ = new QDoubleSpinBox(this);
-    width_->setRange(XN_STYLE_MIN_WIDTH, XN_STYLE_MAX_WIDTH);
-    width_->setSingleStep(0.5);
-    width_->setDecimals(1);
+    // A slider in half-pixel steps (its value is twice the width), with the width beside it.
+    width_ = new QSlider(Qt::Horizontal, this);
+    width_->setFixedWidth(160);
     width_->setFocusPolicy(Qt::ClickFocus);
-    connect(width_, &QDoubleSpinBox::valueChanged, this, [this](double w) {
+    widthValue_ = new QLabel(this);
+    widthValue_->setMinimumWidth(36);
+    connect(width_, &QSlider::valueChanged, this, [this](int v) {
+        const double w = v / 2.0;
+        widthValue_->setText(QString::number(w, 'f', 1));
         const QByteArray tool = currentTool();
         if (!hasWidth(tool) || syncingWidth_) return;
         widths_[tool] = w;
         if (tool == "shape") applyShape();
         else if (auto* e = canvas_->editor()) xn_editor_set_tool_width(e, tool.constData(), w);
     });
-    widthActions_ << tools->addWidget(width_);
+    widthActions_ << tools->addWidget(width_) << tools->addWidget(widthValue_);
 
     // The eraser: whole strokes or just the ink under it.
     eraseMode_ = new QComboBox(this);
@@ -342,10 +352,11 @@ void MainWindow::syncWidth() {
     if (!hasWidth(tool)) return;
     double w = widths_.value(tool, 0);
     if (w <= 0) w = tool == "shape" ? 3.0 : canvas_->editor() ? xn_editor_tool_width(canvas_->editor(), tool.constData()) : 3.0;
-    // The eraser's radius runs to 80, as on Android; the pens' to their own limit.
-    width_->setMaximum(tool == "eraser" ? 80.0 : XN_STYLE_MAX_WIDTH);
+    const auto [lo, hi] = widthRange(tool);
     syncingWidth_ = true;
-    width_->setValue(w);
+    width_->setRange(int(lo * 2), int(hi * 2));
+    width_->setValue(int(std::lround(std::clamp(w, lo, hi) * 2)));
+    widthValue_->setText(QString::number(width_->value() / 2.0, 'f', 1));
     syncingWidth_ = false;
 }
 

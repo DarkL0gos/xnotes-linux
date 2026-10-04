@@ -11,7 +11,7 @@
 
 #include <QAbstractButton>
 #include <QComboBox>
-#include <QDoubleSpinBox>
+#include <QSlider>
 
 #include <QScrollBar>
 #include <QNativeGestureEvent>
@@ -764,7 +764,10 @@ private slots:
         for (QComboBox* c : window.findChildren<QComboBox*>())
             if (c->findText(QStringLiteral("Область")) >= 0) mode = c;
         QVERIFY(mode);
-        QDoubleSpinBox* size = window.findChild<QDoubleSpinBox*>();
+        QSlider* size = nullptr;  // the toolbar's width slider: half-pixel steps
+        for (QSlider* sl : window.findChildren<QSlider*>())
+            if (sl->orientation() == Qt::Horizontal && sl->parentWidget() && sl->parentWidget()->inherits("QToolBar")) size = sl;
+        QVERIFY(size);
 
         action(QStringLiteral("Перо"))->trigger();
         QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(300, 400));
@@ -776,11 +779,11 @@ private slots:
         QCOMPARE(QByteArray(xn_editor_tool(canvas->editor())), QByteArray("eraser"));
         QTest::qWait(50);  // the toolbar lays out its shown widgets on the next pass
         QVERIFY(mode->isVisibleTo(&window));
-        QCOMPARE(size->value(), 24.0);
-        QCOMPARE(size->maximum(), 80.0);
+        QCOMPARE(size->value(), 48);   // radius 24
+        QCOMPARE(size->maximum(), 160); // up to 80
         mode->setCurrentIndex(mode->findText(QStringLiteral("Область")));
         QCOMPARE(xn_editor_erase_mode(canvas->editor()), int(XN_ERASE_AREA));
-        size->setValue(8);
+        size->setValue(16);  // radius 8
         QCOMPARE(xn_editor_tool_width(canvas->editor(), "eraser"), 8.0);
         QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(500, 370));
         for (int i = 1; i <= 12; i++) QTest::mouseMove(canvas, QPoint(500, 370 + i * 5));
@@ -790,7 +793,12 @@ private slots:
         action(QStringLiteral("Перо"))->trigger();
         QTest::qWait(50);
         QVERIFY(!mode->isVisibleTo(&window));
-        QVERIFY(size->value() != 8.0);  // the pen keeps its own width
+        QCOMPARE(size->value(), 6);      // the pen keeps its own width, 3
+        QCOMPARE(size->maximum(), 40);   // up to 20
+        action(QStringLiteral("Маркер"))->trigger();
+        QCOMPARE(size->minimum(), 8);    // 4..40
+        size->setValue(30);
+        QCOMPARE(xn_editor_tool_width(canvas->editor(), "highlighter"), 15.0);
         xn_note* n = window.note();
         QVERIFY(xn_note_is_dirty(n));
     }
