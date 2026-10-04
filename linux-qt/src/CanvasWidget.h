@@ -5,6 +5,7 @@
 
 #include "CoreHost.h"
 
+#include <QCursor>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QWidget>
@@ -57,10 +58,13 @@ public:
 
     /* Statistics for the smoke test and the status bar. */
     int liveSurfaces() const { return core_.liveSurfaces(); }
+    int pendingPdf() const { return core_.pendingPdf(); }
     double lastFrameMs() const { return lastFrameMs_; }
     /* What drew last: "перо", "ластик", "мышь" or "касание", and the pen's pressure. */
     QString lastInput() const { return lastInput_; }
     double lastPressure() const { return lastPressure_; }
+    /* The pen's barrel buttons now: bit 0 the first, bit 1 the second. */
+    int penButtons() const { return penButtons_; }
 
 signals:
     void contentChanged();
@@ -89,7 +93,7 @@ protected:
     void dropEvent(QDropEvent* e) override;
 
 private:
-    xn::CoreHost core_;
+    xn::CoreHost core_{true};
     xn_editor* editor_ = nullptr;
     TextOverlay* textOverlay_;
     QOpenGLWidget* gl_ = nullptr;
@@ -105,6 +109,10 @@ private:
     bool mouseDown_ = false;
     QPointF panFrom_;
     bool panning_ = false;
+    bool penPanning_ = false;  // the pen's second button holds the canvas
+    QPointF penPanFrom_;
+    QCursor panCursor_;
+    int penButtons_ = 0;
     QElapsedTimer clock_;
 
     struct Touch {

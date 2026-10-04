@@ -214,11 +214,12 @@ static int p_size(void* ctx, const char* path, int page, double* w, double* h) {
     *h = 842;
     return 1;
 }
-static void p_draw(void* ctx, void* r, const char* path, int page, int fw, int fh, int rx, int ry, int rw, int rh,
-                   double x, double y, double w, double h) {
+static int p_draw(void* ctx, void* r, const char* path, int page, int fw, int fh, int rx, int ry, int rw, int rh,
+                  double x, double y, double w, double h) {
     host_state* hs = ctx;
     if (fw > 0 && fh > 0 && rw > 0 && rh > 0 && rx + rw <= fw + 1 && ry + rh <= fh + 1 && w > 0 && h > 0) hs->pdf_draws++;
     snprintf(hs->pdf_path, sizeof hs->pdf_path, "%s", path);
+    return 1;
 }
 
 static xn_host make_host(host_state* hs) {

@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 
+class PdfPages;
 class QPdfDocument;
 class QTimer;
 
@@ -72,7 +73,9 @@ struct Surface {
  */
 class CoreHost {
 public:
-    CoreHost();
+    /* backgroundPdf: render PDF pages on a worker and call onPdfReady when sharper ones land
+       (the canvas); otherwise every PDF render is synchronous (export). */
+    explicit CoreHost(bool backgroundPdf = false);
     ~CoreHost();
 
     const xn_host* host() const { return &host_; }
@@ -88,6 +91,10 @@ public:
     std::function<void(QPointF, bool)> onContextMenu;
     std::function<void(QString)> onToolChanged;
     std::function<void(const xn_text_field*)> onTextEdit;
+    std::function<void()> onPdfReady;
+
+    /* PDF renders still running in the background. */
+    int pendingPdf() const;
 
     int liveSurfaces() const { return liveSurfaces_; }
 
@@ -105,6 +112,7 @@ private:
     QHash<uint64_t, QTimer*> timers_;
     /* Open PDFs by path, loaded on first use and kept while the host lives. */
     QHash<QString, QPdfDocument*> pdfs_;
+    std::unique_ptr<PdfPages> pages_;
 
     QPdfDocument* pdf(const char* path);
 
@@ -129,7 +137,7 @@ private:
     static void textEdit(void* ctx, const xn_text_field* field);
     static int pdfPageCount(void* ctx, const char* path);
     static int pdfPageSize(void* ctx, const char* path, int page, double* w, double* h);
-    static void drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
+    static int drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
                             int rw, int rh, double x, double y, double w, double h);
 
     void schedule(uint64_t task, int delayMs);

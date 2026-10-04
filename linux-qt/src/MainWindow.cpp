@@ -119,7 +119,9 @@ MainWindow::MainWindow() {
     connect(stats, &QTimer::timeout, this, [this] {
         const QString input = canvas_->lastInput();
         const double interval = canvas_->frameIntervalMs();
-        inputLabel_->setText((input.isEmpty() ? QString() : QStringLiteral("ввод: %1, давление %2   ").arg(input).arg(canvas_->lastPressure(), 0, 'f', 2)) +
+        const int b = canvas_->penButtons();
+        const QString buttons = b == 0 ? QString() : b == 1 ? QStringLiteral("кнопка пера 1   ") : b == 2 ? QStringLiteral("кнопка пера 2   ") : QStringLiteral("кнопки пера 1+2   ");
+        inputLabel_->setText(buttons + (input.isEmpty() ? QString() : QStringLiteral("ввод: %1, давление %2   ").arg(input).arg(canvas_->lastPressure(), 0, 'f', 2)) +
                              QStringLiteral("%1: кадр %2 мс").arg(canvas_->render() == CanvasWidget::Render::Gl ? QStringLiteral("GPU") : QStringLiteral("CPU"))
                                  .arg(canvas_->lastFrameMs(), 0, 'f', 1) +
                              (interval > 0 ? QStringLiteral(", %1 к/с").arg(int(std::lround(1000 / interval))) : QString()));
@@ -534,7 +536,7 @@ void MainWindow::exportPdf() {
     QString out = QFileDialog::getSaveFileName(this, QStringLiteral("Экспорт в PDF"), base, QStringLiteral("PDF (*.pdf)"));
     if (out.isEmpty()) return;
     if (!out.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) out += QLatin1String(".pdf");
-    const QString error = writePdf(note_, canvas_->host(), out, dark_ ? 0x161616FFu : 0xFFFFFFFFu, [this](int done, int total) {
+    const QString error = writePdf(note_, out, dark_ ? 0x161616FFu : 0xFFFFFFFFu, [this](int done, int total) {
         statusBar()->showMessage(QStringLiteral("Экспорт: страница %1 из %2").arg(done).arg(total));
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     });

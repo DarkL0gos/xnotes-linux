@@ -9,6 +9,7 @@
 #include "NoteFinder.h"
 
 #include <QScrollBar>
+#include <QNativeGestureEvent>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
@@ -504,7 +505,7 @@ private slots:
 
         const QString out = dir.filePath(QStringLiteral("export.pdf"));
         int pagesDone = 0;
-        QCOMPARE(writePdf(note, canvas.host(), out, 0xFFFFFFFFu, [&](int done, int) { pagesDone = done; }), QString());
+        QCOMPARE(writePdf(note, out, 0xFFFFFFFFu, [&](int done, int) { pagesDone = done; }), QString());
         QCOMPARE(pagesDone, 2);
         QPdfDocument exported;
         QCOMPARE(exported.load(out), QPdfDocument::Error::None);
@@ -640,6 +641,54 @@ private slots:
         };
         stroke("pen", 0x1060c0ff, 300);
         stroke("highlighter", 0xffeb3bff, 310);  // across the ink
+        canvas.setNote(nullptr);
+        xn_note_close(note);
+    }
+
+    /* The pen's second button drags the canvas; the first, or both, erase; a pinch zooms. */
+    void penButtonsAndPinch() {
+        xn_note* note = xn_note_new(3);
+        CanvasWidget canvas;
+        canvas.resize(800, 900);
+        canvas.show();
+        canvas.setNote(note);
+        canvas.setTool("pen");
+        auto line = [&](double y, Qt::MouseButtons extra) {
+            tablet(&canvas, QEvent::TabletPress, {200, y}, 0.5, Qt::LeftButton, Qt::LeftButton | extra);
+            for (int i = 1; i <= 20; i++) tablet(&canvas, QEvent::TabletMove, {200.0 + i * 10, y}, 0.5, Qt::NoButton, Qt::LeftButton | extra);
+            tablet(&canvas, QEvent::TabletRelease, {400, y}, 0, Qt::LeftButton, extra);
+        };
+        line(300, Qt::NoButton);
+        QCOMPARE(xn_note_item_count(note, 0), 1);
+
+        // Second button: hover in, press it, drag up; the view scrolls down and nothing is drawn.
+        double before[6], after[6];
+        xn_editor_scroll_info(canvas.editor(), before);
+        tablet(&canvas, QEvent::TabletMove, {400, 600}, 0, Qt::NoButton, Qt::NoButton);
+        tablet(&canvas, QEvent::TabletPress, {400, 600}, 0, Qt::RightButton, Qt::RightButton);
+        for (int i = 1; i <= 10; i++) tablet(&canvas, QEvent::TabletMove, {400, 600.0 - i * 20}, 0.5, Qt::NoButton, Qt::RightButton | Qt::LeftButton);
+        tablet(&canvas, QEvent::TabletRelease, {400, 400}, 0, Qt::RightButton, Qt::LeftButton);
+        xn_editor_scroll_info(canvas.editor(), after);
+        QVERIFY2(after[1] - before[1] > 150, qPrintable(QStringLiteral("scrolled %1").arg(after[1] - before[1])));
+        QCOMPARE(xn_note_item_count(note, 0), 1);
+        tablet(&canvas, QEvent::TabletRelease, {400, 400}, 0, Qt::LeftButton, Qt::NoButton);
+        xn_editor_scroll_to(canvas.editor(), 0, 0);
+
+        // Both buttons: the eraser, across the line.
+        tablet(&canvas, QEvent::TabletPress, {300, 260}, 0.5, Qt::LeftButton, Qt::LeftButton | Qt::MiddleButton | Qt::RightButton);
+        for (int i = 1; i <= 16; i++) tablet(&canvas, QEvent::TabletMove, {300, 260.0 + i * 5}, 0.5, Qt::NoButton, Qt::LeftButton | Qt::MiddleButton | Qt::RightButton);
+        tablet(&canvas, QEvent::TabletRelease, {300, 340}, 0, Qt::LeftButton, Qt::MiddleButton | Qt::RightButton);
+        QCOMPARE(xn_note_item_count(note, 0), 0);
+
+        // A touchpad pinch.
+        const double zoom = xn_editor_zoom(canvas.editor());
+        for (int i = 0; i < 5; i++) {
+            QNativeGestureEvent g(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2, QPointF(400, 400),
+                                  QPointF(400, 400), canvas.mapToGlobal(QPointF(400, 400)), 0.1, QPointF());
+            QApplication::sendEvent(&canvas, &g);
+        }
+        QVERIFY2(xn_editor_zoom(canvas.editor()) > zoom * 1.4, qPrintable(QStringLiteral("%1 -> %2").arg(zoom).arg(xn_editor_zoom(canvas.editor()))));
+
         canvas.setNote(nullptr);
         xn_note_close(note);
     }

@@ -45,7 +45,8 @@ add_library(xnotes_host STATIC
     src/SelectionBar.cpp src/SelectionBar.h
     src/TextOverlay.cpp src/TextOverlay.h
     src/PdfExport.cpp src/PdfExport.h
-    src/NoteFinder.cpp src/NoteFinder.h)
+    src/NoteFinder.cpp src/NoteFinder.h
+    src/PdfPages.cpp src/PdfPages.h)
 target_include_directories(xnotes_host PUBLIC src)
 target_link_libraries(xnotes_host PUBLIC Qt6::Widgets Qt6::OpenGLWidgets Qt6::Pdf ZLIB::ZLIB xnotes_core)
 target_compile_options(xnotes_host PRIVATE -Wall -Wextra)

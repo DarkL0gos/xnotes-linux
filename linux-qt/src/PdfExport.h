@@ -12,5 +12,4 @@
  * as vectors; a PDF background is rendered at 300 dpi; paper fills pages without a colour of their
  * own. progress(done, total) runs after each page. Returns an error message, or empty on success.
  */
-QString writePdf(xn_note* note, const xn_host* host, const QString& path, xn_rgba paper,
-                 const std::function<void(int, int)>& progress = {});
+QString writePdf(xn_note* note, const QString& path, xn_rgba paper, const std::function<void(int, int)>& progress = {});

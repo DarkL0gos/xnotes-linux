@@ -16,8 +16,11 @@ constexpr double kPdfScale = 2.0;
 
 }  // namespace
 
-QString writePdf(xn_note* note, const xn_host* host, const QString& path, xn_rgba paper,
-                 const std::function<void(int, int)>& progress) {
+QString writePdf(xn_note* note, const QString& path, xn_rgba paper, const std::function<void(int, int)>& progress) {
+    // A host of its own, whose PDF backgrounds render synchronously and exactly (the canvas's
+    // render them in the background and draws what it has meanwhile).
+    xn::CoreHost exportHost;
+    const xn_host* host = exportHost.host();
     const int pages = xn_note_page_count(note);
     const int dpi = xn_note_dpi(note);
     if (pages <= 0 || dpi <= 0) return QStringLiteral("В заметке нет страниц");

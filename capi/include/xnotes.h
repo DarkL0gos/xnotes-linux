@@ -161,10 +161,12 @@ typedef struct xn_host {
     /*
      * Draw part of a PDF page as a note page's background: the page rendered at full_w x full_h
      * pixels, of which the pixel rect (rx, ry, rw, rh) goes into the renderer's rect
-     * (x, y, w, h) under its current transform.
+     * (x, y, w, h) under its current transform. Returns 1 when that was the exact render, 0 when
+     * a stand-in (say a render at another size, scaled) while the exact one is made; the host
+     * then calls xn_editor_refresh_backgrounds once it has it.
      */
-    void (*draw_pdf_page)(void* ctx, void* renderer, const char* path, int page, int full_w, int full_h,
-                          int rx, int ry, int rw, int rh, double x, double y, double w, double h);
+    int (*draw_pdf_page)(void* ctx, void* renderer, const char* path, int page, int full_w, int full_h,
+                         int rx, int ry, int rw, int rh, double x, double y, double w, double h);
 } xn_host;
 
 /* --- library -------------------------------------------------------------------------------- */
@@ -327,6 +329,12 @@ void xn_editor_text_commit(xn_editor* editor);
    face: "mono", "sans", "serif", "hand" or a family name; size in points (6..96). */
 void xn_editor_set_text_face(xn_editor* editor, const char* face);
 void xn_editor_set_text_size(xn_editor* editor, double point_size);
+
+/*
+ * The host now has the exact PDF renders it stood in for (draw_pdf_page returned 0): redraw the
+ * backgrounds that got a stand-in, and only those.
+ */
+void xn_editor_refresh_backgrounds(xn_editor* editor);
 
 /* --- images --- */
 

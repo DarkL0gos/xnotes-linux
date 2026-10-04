@@ -30,7 +30,16 @@ object CanvasFramePainter {
 
     /** Paint the document (everything below the interaction overlay) into [r], in viewport pixels. */
     fun paint(r: Renderer, st: CanvasState): Frame {
-        r.fillBackground(Rect(0.0, 0.0, st.viewportW.toDouble(), st.viewportH.toDouble()), st.palette.bg)
+        // Past the resolution cap a sharp render of the view may cover all of it: it is opaque
+        // (background, paper, page backgrounds), so nothing under it needs drawing. Scaling the
+        // soft page caches up only to hide them was most of a frame's cost on a large screen.
+        val pastCap = st.isPastResolutionCap()
+        val sharp = if (pastCap) st.sharpViewportBlit() else null
+        val covered = sharp != null && sharp.dx <= 0.0 && sharp.dy <= 0.0 &&
+            sharp.dx + sharp.base.width * sharp.scale >= st.viewportW &&
+            sharp.dy + sharp.base.height * sharp.scale >= st.viewportH
+
+        if (!covered) r.fillBackground(Rect(0.0, 0.0, st.viewportW.toDouble(), st.viewportH.toDouble()), st.palette.bg)
 
         val origin = st.origin()
         r.save()
@@ -50,6 +59,12 @@ object CanvasFramePainter {
             val page = st.document.pages[i]
             cachedPages.add(page)
 
+            if (covered) {
+                // Hidden under the sharp render; still keep the caches coming for when it moves.
+                st.backgroundForOrSchedule(page)
+                st.cacheForOrSchedule(page)
+                continue
+            }
             r.fillRect(pr, st.paperColor(page))
             if (st.pageBorders) r.strokeRect(pr, border)
             st.backgroundForOrSchedule(page)?.let { blitPageSurface(r, st, page, pr, it.surface) }
@@ -90,8 +105,8 @@ object CanvasFramePainter {
         // the strip panning into view; once the view settles we re-render the sharp viewport for
         // the new area. A zoom change drops back to the soft caches until the settle re-render.
         val sharpSettle: Boolean
-        if (st.isPastResolutionCap()) {
-            val blit = st.sharpViewportBlit()
+        if (pastCap) {
+            val blit = sharp
             if (blit != null) {
                 val dw = blit.base.width * blit.scale
                 val dh = blit.base.height * blit.scale

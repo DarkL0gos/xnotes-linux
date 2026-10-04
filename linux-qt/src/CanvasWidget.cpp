@@ -3,6 +3,7 @@
 #include "TextOverlay.h"
 
 #include <QMimeData>
+#include <QNativeGestureEvent>
 #include <QOpenGLWidget>
 #include <QSurfaceFormat>
 #include <QMouseEvent>
@@ -91,6 +92,7 @@ CanvasWidget::CanvasWidget(QWidget* parent) : QWidget(parent) {
     }
     textOverlay_ = new TextOverlay(this);
     core_.onTextEdit = [this](const xn_text_field* field) { textOverlay_->onTextEdit(field); };
+    core_.onPdfReady = [this] { if (editor_) xn_editor_refresh_backgrounds(editor_); };
     core_.onNotice = [this](int code) { emit notice(code); };
     core_.onSelectionMenu = [this](bool shown, QRectF r) {
         emit selectionMenu(shown, QRectF(r.topLeft() / dpr_, r.size() / dpr_));
@@ -171,6 +173,16 @@ bool CanvasWidget::event(QEvent* e) {
         updateViewport();
         requestFrame();
         break;
+    case QEvent::NativeGesture: {
+        // A touchpad pinch: zoom about the fingers.
+        auto* g = static_cast<QNativeGestureEvent*>(e);
+        if (g->gestureType() == Qt::ZoomNativeGesture && editor_) {
+            const QPointF at = device(g->position());
+            xn_editor_zoom_at(editor_, at.x(), at.y(), std::clamp(1.0 + g->value(), 0.5, 2.0));
+            return true;
+        }
+        break;
+    }
     default:
         break;
     }
@@ -225,16 +237,20 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         out.fillRect(rect(), QColor(0x0a, 0x0a, 0x0a));
         return;
     }
-    // Composed in memory at device resolution, one frame pixel per device pixel, then blitted.
+    // Composed in memory at device resolution, then copied out. The frame carries the device pixel
+    // ratio, so painting into it works in logical pixels and the copy is pixel for pixel (an
+    // unmarked frame drawn into the scaled window painter took Qt's slow transforming path).
     const QSize size(int(std::ceil(width() * dpr_)), int(std::ceil(height() * dpr_)));
-    const bool kept = frame_.size() == size;
-    if (!kept) frame_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
+    const bool kept = frame_.size() == size && frame_.devicePixelRatio() == dpr_;
+    if (!kept) {
+        frame_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
+        frame_.setDevicePixelRatio(dpr_);
+    }
     {
         QPainter p(&frame_);
-        p.scale(dpr_, dpr_);  // renderFrame works in logical pixels
         renderFrame(p, kept);
     }
-    out.drawImage(QRectF(0, 0, size.width() / dpr_, size.height() / dpr_), frame_);
+    out.drawImage(QPointF(0, 0), frame_);
 }
 
 void CanvasWidget::send(int action, int actionIndex, int buttons, const std::vector<xn_pointer>& pointers, bool hover) {
@@ -262,10 +278,32 @@ void CanvasWidget::tabletEvent(QTabletEvent* e) {
     const bool eraser = e->pointerType() == QPointingDevice::PointerType::Eraser;
     const QPointF at = device(e->position());
     xn_pointer p{0, eraser ? XN_TOOL_TYPE_ERASER : XN_TOOL_TYPE_STYLUS, float(at.x()), float(at.y()), float(e->pressure())};
-    int buttons = 0;
     // The barrel buttons: Qt reports them as the middle and right buttons of the pen.
-    if (e->buttons() & Qt::MiddleButton) buttons |= XN_BUTTON_STYLUS_PRIMARY;
-    if (e->buttons() & Qt::RightButton) buttons |= XN_BUTTON_STYLUS_SECONDARY;
+    const bool first = e->buttons() & Qt::MiddleButton, second = e->buttons() & Qt::RightButton;
+    penButtons_ = (first ? 1 : 0) | (second ? 2 : 0);
+
+    // The second button alone grabs the canvas: it follows the pen, touching or hovering, while
+    // the button is held. Not in the middle of a stroke, which the button does not interrupt.
+    if (penPanning_) {
+        if (second && !first && e->type() != QEvent::TabletLeaveProximity) {
+            if (editor_) xn_editor_scroll_by(editor_, penPanFrom_.x() - at.x(), penPanFrom_.y() - at.y());
+            penPanFrom_ = at;
+        } else {
+            penPanning_ = false;
+            setCursor(panCursor_);
+        }
+        return;
+    }
+    if (second && !first && !penDown_ && e->type() != QEvent::TabletLeaveProximity) {
+        penPanning_ = true;
+        penPanFrom_ = at;
+        panCursor_ = cursor();
+        setCursor(Qt::ClosedHandCursor);
+        return;
+    }
+
+    // The first button, or both, is the core's pen button (the eraser).
+    const int buttons = first ? XN_BUTTON_STYLUS_PRIMARY | (second ? XN_BUTTON_STYLUS_SECONDARY : 0) : 0;
     switch (e->type()) {
     case QEvent::TabletPress:
         if (penDown_ || e->button() != Qt::LeftButton) break;

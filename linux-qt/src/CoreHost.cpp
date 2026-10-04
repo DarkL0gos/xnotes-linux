@@ -1,8 +1,9 @@
 #include "CoreHost.h"
 
+#include "PdfPages.h"
+
 #include <QFontMetricsF>
 #include <QPdfDocument>
-#include <QPdfDocumentRenderOptions>
 #include <QImageReader>
 #include <QPainterPath>
 #include <QTextLayout>
@@ -136,7 +137,40 @@ void rClear(void* r) {
     p->fillRect(area, Qt::transparent);
     p->restore();
 }
-void rFillRect(void* r, double x, double y, double w, double h, xn_rgba c) { P(r)->fillRect(QRectF(x, y, w, h), toColor(c)); }
+/*
+ * Runs block(device rect) with the painter set to device pixels (identity world transform on top
+ * of the device's own pixel ratio), when the current transform only scales and translates.
+ * Returns what block returned, or false when the transform does more.
+ */
+template <typename F>
+bool inDevicePixels(QPainter* p, const QRectF& rect, F block) {
+    const QTransform t = p->deviceTransform();
+    if (t.type() > QTransform::TxScale) return false;
+    const QRectF device = t.mapRect(rect);
+    const double dpr = p->device()->devicePixelRatioF();
+    p->save();
+    p->setWorldTransform(QTransform::fromScale(1 / dpr, 1 / dpr));
+    const bool done = block(device);
+    p->restore();
+    return done;
+}
+
+/*
+ * Axis-aligned fills (the gap, the paper) snap to whole device pixels and skip antialiasing,
+ * which on a fractional full-screen rect cost several milliseconds a frame.
+ */
+void rFillRect(void* r, double x, double y, double w, double h, xn_rgba c) {
+    QPainter* p = P(r);
+    const QColor color = toColor(c);
+    const bool snapped = inDevicePixels(p, QRectF(x, y, w, h), [&](const QRectF& d) {
+        p->setRenderHint(QPainter::Antialiasing, false);  // whole pixels; Qt's coverage path is slow
+        const QRect whole(QPoint(int(std::lround(d.left())), int(std::lround(d.top()))),
+                          QPoint(int(std::lround(d.right())) - 1, int(std::lround(d.bottom())) - 1));
+        if (!whole.isEmpty()) p->fillRect(whole, color);
+        return true;
+    });
+    if (!snapped) p->fillRect(QRectF(x, y, w, h), color);
+}
 void rFillPolygon(void* r, const double* xy, int n, xn_rgba c, int rule) {
     QPolygonF poly;
     poly.reserve(n);
@@ -224,9 +258,17 @@ void rDrawSurface(void* r, void* surface, const double* dest, const double* src,
     p->setOpacity(alpha);
     if (blend == XN_BLEND_MULTIPLY) p->setCompositionMode(QPainter::CompositionMode_Multiply);
     else if (blend == XN_BLEND_SCREEN) p->setCompositionMode(QPainter::CompositionMode_Screen);
-    QRectF target(dest[0], dest[1], dest[2], dest[3]);
-    QRectF source = src ? QRectF(src[0], src[1], src[2], src[3]) : QRectF(s->image.rect());
-    p->drawImage(target, s->image, source);
+    const QRectF target(dest[0], dest[1], dest[2], dest[3]);
+    const QRectF source = src ? QRectF(src[0], src[1], src[2], src[3]) : QRectF(s->image.rect());
+    // A cache made for this zoom is drawn unscaled, at its exact (fractional) position: Qt's
+    // translate-only path. Fitted into a rect a fraction of a pixel off its size it went through
+    // the filtered scaling path instead, six times slower at 3456x2304.
+    const bool copied = inDevicePixels(p, target, [&](const QRectF& d) {
+        if (std::abs(d.width() - source.width()) > 1 || std::abs(d.height() - source.height()) > 1) return false;
+        p->drawImage(d.topLeft(), s->image, source);
+        return true;
+    });
+    if (!copied) p->drawImage(target, s->image, source);
     p->restore();
 }
 
@@ -283,21 +325,11 @@ void rDrawTextRun(void* r, const uint16_t* text, int len, double x, double basel
     p->restore();
 }
 
-
-}  // namespace
-#include <QElapsedTimer>
-#include <cstdio>
-struct ProfEntry { const char* name; double ms; long n; };
-ProfEntry gProf[32];
-extern "C" void xn_prof_dump() { for (auto& e : gProf) if (e.name && e.n) fprintf(stderr, "  %-16s %8.2f ms %7ld calls\n", e.name, e.ms, e.n); for (auto& e : gProf) { e.ms = 0; e.n = 0; } }
-namespace {
-template <int I, auto F> struct Timed;
-template <int I, typename R, typename... A, R (*F)(A...)> struct Timed<I, F> {
-    static R call(A... a) { QElapsedTimer t; t.start(); if constexpr (std::is_void_v<R>) { F(a...); gProf[I].ms += t.nsecsElapsed()/1e6; gProf[I].n++; } else { R r = F(a...); gProf[I].ms += t.nsecsElapsed()/1e6; gProf[I].n++; return r; } }
-};
-struct ProfInit { ProfInit() { gProf[0].name="rSave";gProf[1].name="rRestore";gProf[2].name="rSaveLayer";gProf[3].name="rTranslate";gProf[4].name="rScale";gProf[5].name="rRotate";gProf[6].name="rClipRect";gProf[7].name="rClear";gProf[8].name="rFillRect";gProf[9].name="rFillPolygon";gProf[10].name="rFillEllipse";gProf[11].name="rFillDiskRibbon";gProf[12].name="rStrokePolyline";gProf[13].name="rStrokeRect";gProf[14].name="rStrokeEllipse";gProf[15].name="rDrawSurface";gProf[16].name="rDrawImage";gProf[17].name="rDrawText";gProf[18].name="rDrawTextRun"; } } gProfInit;
 const xn_renderer_vt kVtable = {
-    Timed<0,rSave>::call, Timed<1,rRestore>::call, Timed<2,rSaveLayer>::call, Timed<3,rTranslate>::call, Timed<4,rScale>::call, Timed<5,rRotate>::call, Timed<6,rClipRect>::call, Timed<7,rClear>::call, Timed<8,rFillRect>::call, Timed<9,rFillPolygon>::call, Timed<10,rFillEllipse>::call, Timed<11,rFillDiskRibbon>::call, Timed<12,rStrokePolyline>::call, Timed<13,rStrokeRect>::call, Timed<14,rStrokeEllipse>::call, Timed<15,rDrawSurface>::call, Timed<16,rDrawImage>::call, Timed<17,rDrawText>::call, Timed<18,rDrawTextRun>::call,
+    rSave, rRestore, rSaveLayer, rTranslate, rScale, rRotate, rClipRect, rClear,
+    rFillRect, rFillPolygon, rFillEllipse, rFillDiskRibbon,
+    rStrokePolyline, rStrokeRect, rStrokeEllipse,
+    rDrawSurface, rDrawImage, rDrawText, rDrawTextRun,
 };
 
 CoreHost* H(void* ctx) { return static_cast<CoreHost*>(ctx); }
@@ -329,7 +361,8 @@ QFont CoreHost::fontForFace(const QString& face, double pixelSize, bool bold, bo
 
 // --- host services ---------------------------------------------------------------------------
 
-CoreHost::CoreHost() {
+CoreHost::CoreHost(bool backgroundPdf)
+    : pages_(backgroundPdf ? std::make_unique<PdfPages>([this] { if (onPdfReady) onPdfReady(); }) : std::make_unique<PdfPages>()) {
     host_.ctx = this;
     host_.renderer = &kVtable;
     host_.surface_create = surfaceCreate;
@@ -496,25 +529,14 @@ int CoreHost::pdfPageSize(void* ctx, const char* path, int page, double* w, doub
     return 1;
 }
 
-/* Renders just the requested pixels of the page at its full scale, then places them. */
-void CoreHost::drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
-                           int rw, int rh, double x, double y, double w, double h) {
-    QPdfDocument* doc = H(ctx)->pdf(path);
-    if (!doc || page < 0 || page >= doc->pageCount() || rw <= 0 || rh <= 0) return;
-    QPdfDocumentRenderOptions options;
-    options.setScaledSize(QSize(fullW, fullH));
-    options.setScaledClipRect(QRect(rx, ry, rw, rh));
-    options.setRenderFlags(QPdfDocumentRenderOptions::RenderFlag::Annotations);
-    const QImage image = doc->render(page, QSize(rw, rh), options);
-    if (image.isNull()) return;
-    QPainter* p = P(renderer);
-    p->save();
-    p->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    // A PDF page is white paper; QtPdf leaves what it does not paint transparent.
-    p->fillRect(QRectF(x, y, w, h), Qt::white);
-    p->drawImage(QRectF(x, y, w, h), image);
-    p->restore();
+int CoreHost::drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
+                          int rw, int rh, double x, double y, double w, double h) {
+    if (rw <= 0 || rh <= 0) return 1;
+    return H(ctx)->pages_->draw(P(renderer), QString::fromUtf8(path), page, QSize(fullW, fullH), QRect(rx, ry, rw, rh),
+                                QRectF(x, y, w, h)) ? 1 : 0;
 }
+
+int CoreHost::pendingPdf() const { return pages_->pending(); }
 
 void CoreHost::toolChanged(void* ctx, const char* toolId) {
     if (H(ctx)->onToolChanged) H(ctx)->onToolChanged(QString::fromUtf8(toolId));

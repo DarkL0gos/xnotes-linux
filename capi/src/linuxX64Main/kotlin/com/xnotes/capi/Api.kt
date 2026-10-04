@@ -115,27 +115,28 @@ private fun codecFor(host: CPointer<xn_host>?): DocumentCodec {
  * The slice of [page]'s PDF background inside [region] (page px), rendered by the host at [res]
  * device px per page px. The raster covers the page's content box only; a margin is paper beside it.
  */
-internal fun paintPdfBackground(host: xn_host, doc: Document, page: Page, renderer: Renderer, res: Double, region: Rect) {
-    val pdf = doc.pdfFile ?: return
-    val index = page.pdfPage ?: return
-    val draw = host.draw_pdf_page ?: return
-    val target = (renderer as? CRenderer)?.r ?: return
+/** Returns false when the host drew a stand-in for the exact render. */
+internal fun paintPdfBackground(host: xn_host, doc: Document, page: Page, renderer: Renderer, res: Double, region: Rect): Boolean {
+    val pdf = doc.pdfFile ?: return true
+    val index = page.pdfPage ?: return true
+    val draw = host.draw_pdf_page ?: return true
+    val target = (renderer as? CRenderer)?.r ?: return true
     val l = region.left.coerceAtLeast(0.0)
     val t = region.top.coerceAtLeast(0.0)
     val r = region.right.coerceAtMost(page.width)
     val b = region.bottom.coerceAtMost(page.height)
-    if (r <= l || b <= t) return
+    if (r <= l || b <= t) return true
     val rx = floor(l * res).toInt()
     val ry = floor(t * res).toInt()
     val rw = ceil(r * res).toInt() - rx
     val rh = ceil(b * res).toInt() - ry
-    if (rw <= 0 || rh <= 0) return
-    memScoped {
+    if (rw <= 0 || rh <= 0) return true
+    return memScoped {
         // The pixel rect, mapped back to page px, so whole pixels land exactly.
         draw.invoke(
             host.ctx, target, pdf.pathString.cstr.ptr, index, ceil(page.width * res).toInt(), ceil(page.height * res).toInt(),
             rx, ry, rw, rh, rx / res, ry / res, rw / res, rh / res,
-        )
+        ) != 0
     }
 }
 
@@ -236,7 +237,7 @@ fun xnNotePaintPage(note: COpaquePointer?, page: Int, renderer: COpaquePointer?,
         val r = CRenderer(h.renderer!!.pointed, renderer)
         val box = st.footprint(p)
         r.fillRect(box, st.effectivePageColor(p) ?: unpack(paper))
-        paintPdfBackground(h, doc, p, r, pdfScale, box)
+        paintPdfBackground(h, doc, p, r, pdfScale, box)  // the export host always draws exactly
         st.paintRuling(p, r, box)
         for (item in p.items) item.paint(r)
     }
@@ -346,6 +347,9 @@ internal class CEditor(note: CNote, private val host: xn_host) {
         }
     }
 
+    /** Pages whose background got a stand-in PDF render, redrawn once the host has the exact one. */
+    val standIns = LinkedHashSet<Page>()
+
     /** The locked item the last context menu was opened on. */
     var pressedLocked: CanvasItem? = null
     val editor = NoteEditor(state, history, controller, CTextMeasurer(host), object : NoteEditorHost {
@@ -365,7 +369,7 @@ internal class CEditor(note: CNote, private val host: xn_host) {
 
     init {
         state.paintPageBackground = { page, renderer, res, region ->
-            paintPdfBackground(host, state.document, page, renderer, res, region)
+            if (!paintPdfBackground(host, state.document, page, renderer, res, region)) standIns.add(page)
             state.paintRuling(page, renderer, region)
         }
         controller.setTool(Tool.PEN)
@@ -736,6 +740,16 @@ fun xnEditorSetTextFace(editor: COpaquePointer?, face: String?) = guard(Unit) {
 
 @CName("xn_editor_set_text_size")
 fun xnEditorSetTextSize(editor: COpaquePointer?, size: Double) = guard(Unit) { editor!!.editor().controller.setTextPointSize(size) }
+
+@CName("xn_editor_refresh_backgrounds")
+fun xnEditorRefreshBackgrounds(editor: COpaquePointer?) = guard(Unit) {
+    val e = editor!!.editor()
+    val pages = e.standIns.toList()
+    e.standIns.clear()
+    // Just the background layer (and the sharp view over it); ink caches stay.
+    for (page in pages) e.state.refreshBackground(page)
+    e.requestRender()
+}
 
 @CName("xn_editor_insert_image")
 fun xnEditorInsertImage(editor: COpaquePointer?, path: String?, atPoint: Int, x: Double, y: Double): Int = guard(0) {
