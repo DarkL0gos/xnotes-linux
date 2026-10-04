@@ -10,7 +10,10 @@ import com.xnotes.capi.c.xn_host
 import com.xnotes.capi.c.xn_palette
 import com.xnotes.capi.c.xn_pointer
 import com.xnotes.capi.c.xn_pointer_event
+import com.xnotes.capi.c.xn_page_style
 import com.xnotes.capi.c.xn_shape_style
+import com.xnotes.core.model.PagePattern
+import com.xnotes.core.model.PageStyle
 import com.xnotes.capi.c.xn_text_field
 import com.xnotes.canvas.EditingField
 import com.xnotes.core.pal.FontFace
@@ -656,6 +659,32 @@ fun xnEditorZoom(editor: COpaquePointer?): Double = guard(1.0) { editor!!.editor
 @CName("xn_editor_set_palette")
 fun xnEditorSetPalette(editor: COpaquePointer?, palette: CPointer<xn_palette>?) = guard(Unit) {
     editor!!.editor().setPalette(CPalette(palette!!.pointed))
+}
+
+@CName("xn_editor_page_style")
+fun xnEditorPageStyle(editor: COpaquePointer?, allPages: Int, out: CPointer<xn_page_style>?) = guard(Unit) {
+    val e = editor!!.editorQuiet().editor
+    val st = if (allPages != 0) e.documentStyle else e.currentPageStyle
+    val o = out!!.pointed
+    o.has_page_color = if (st.pageColor != null) 1 else 0
+    o.page_color = st.pageColor?.packed() ?: 0u
+    o.pattern = st.pattern?.let { PagePattern.entries.indexOf(it) } ?: -1
+    o.has_pattern_color = if (st.patternColor != null) 1 else 0
+    o.pattern_color = st.patternColor?.packed() ?: 0u
+    o.spacing = st.spacing ?: 0.0
+}
+
+@CName("xn_editor_set_page_style")
+fun xnEditorSetPageStyle(editor: COpaquePointer?, allPages: Int, style: CPointer<xn_page_style>?) = guard(Unit) {
+    val s = style!!.pointed
+    val next = PageStyle(
+        pageColor = if (s.has_page_color != 0) unpack(s.page_color) else null,
+        pattern = PagePattern.entries.getOrNull(s.pattern),
+        patternColor = if (s.has_pattern_color != 0) unpack(s.pattern_color) else null,
+        spacing = s.spacing.takeIf { it > 0.0 }?.coerceIn(PageStyle.MIN_SPACING, PageStyle.MAX_SPACING),
+    )
+    val e = editor!!.editor().editor
+    if (allPages != 0) e.setDocumentStyle(next) else e.setCurrentPageStyle(next)
 }
 
 @CName("xn_editor_add_page")

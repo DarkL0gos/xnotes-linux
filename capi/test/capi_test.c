@@ -433,6 +433,26 @@ int main(int argc, char** argv) {
     CHECK(sc[1] == sc[3], "scrolling is clamped");
     xn_editor_scroll_to(ed, 0, 0);
 
+    /* v2: page style. */
+    xn_page_style ps;
+    xn_editor_page_style(ed, 1, &ps);
+    CHECK(ps.pattern == XN_PATTERN_INHERIT && !ps.has_page_color && ps.spacing <= 0, "a new note overrides nothing");
+    xn_page_style grid = {1, 0xF7F3E9FFu, XN_PATTERN_GRID, 1, 0x3060C080u, 40.0};
+    int dirtyBefore = xn_note_is_dirty(note);
+    xn_editor_set_page_style(ed, 1, &grid);
+    xn_editor_page_style(ed, 1, &ps);
+    CHECK(ps.pattern == XN_PATTERN_GRID && ps.page_color == 0xF7F3E9FFu && ps.pattern_color == 0x3060C080u && ps.spacing == 40.0,
+          "all pages: grid on cream");
+    CHECK(xn_note_is_dirty(note) == 1, "a style change marks the note changed (was %d)", dirtyBefore);
+    xn_page_style lines = {0, 0, XN_PATTERN_LINES, 0, 0, 1000.0};
+    xn_editor_set_page_style(ed, 0, &lines);
+    xn_editor_page_style(ed, 0, &ps);
+    CHECK(ps.pattern == XN_PATTERN_LINES && ps.spacing == XN_PATTERN_MAX_SPACING && !ps.has_page_color, "current page: lines, clamped");
+    xn_editor_page_style(ed, 1, &ps);
+    CHECK(ps.pattern == XN_PATTERN_GRID, "the note keeps its grid");
+    memset(&hs.offscreen, 0, sizeof hs.offscreen);
+    xn_editor_paint(ed, &hs.screen_target);
+
     /* v2: images. */
     CHECK(xn_editor_insert_image(ed, "/nonexistent/file.txt", 0, 0, 0) == 0, "an unreadable image is refused");
     CHECK(xn_editor_insert_image(ed, "/tmp/picture.png", 1, 400, 500) == 1, "insert an image");

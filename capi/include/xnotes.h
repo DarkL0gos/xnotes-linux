@@ -405,6 +405,33 @@ typedef struct xn_palette {
 } xn_palette;
 void xn_editor_set_palette(xn_editor* editor, const xn_palette* palette);
 
+/* --- page style: paper colour and ruling --- */
+
+enum { XN_PATTERN_INHERIT = -1, XN_PATTERN_NONE = 0, XN_PATTERN_LINES = 1, XN_PATTERN_DOTS = 2, XN_PATTERN_GRID = 3 };
+
+/* Ruling period range, in page pixels (64 by default, about 10.8 mm at 150 dpi). */
+#define XN_PATTERN_MIN_SPACING 16.0
+#define XN_PATTERN_MAX_SPACING 200.0
+
+/*
+ * A page style override. Each field may inherit (has_* = 0, pattern = XN_PATTERN_INHERIT,
+ * spacing <= 0): the current page from the whole note, the note from the defaults (theme
+ * paper, no ruling, translucent grey lines 64 px apart).
+ */
+typedef struct xn_page_style {
+    int has_page_color;
+    xn_rgba page_color;
+    int pattern;
+    int has_pattern_color;
+    xn_rgba pattern_color; /* its alpha is the ruling's opacity */
+    double spacing;
+} xn_page_style;
+
+/* The override of all pages (all_pages = 1) or of the current page. */
+void xn_editor_page_style(const xn_editor* editor, int all_pages, xn_page_style* out);
+/* Replace it; the canvas redraws, the note is marked changed (a style is not an undo step). */
+void xn_editor_set_page_style(xn_editor* editor, int all_pages, const xn_page_style* style);
+
 /* --- pages --- */
 
 void xn_editor_add_page(xn_editor* editor);

@@ -2,6 +2,7 @@
 
 #include "CanvasWidget.h"
 #include "NoteFinder.h"
+#include "PageStylePopup.h"
 #include "PdfExport.h"
 #include "SelectionBar.h"
 
@@ -175,6 +176,15 @@ void MainWindow::buildUi() {
             xn_editor_delete_current_page(canvas_->editor());
     });
     bar->addSeparator();
+    bar->addAction(QStringLiteral("Фон…"), this, [this] {
+        if (!canvas_->editor()) return;
+        if (!pageStyle_) {
+            pageStyle_ = new PageStylePopup(canvas_->editor(), this);
+            pageStyle_->setAttribute(Qt::WA_DeleteOnClose);
+        }
+        pageStyle_->show();
+        pageStyle_->raise();
+    });
     QAction* dark = bar->addAction(QStringLiteral("Тёмная"));
     dark->setCheckable(true);
     dark->setChecked(dark_);
@@ -420,6 +430,7 @@ void MainWindow::showContextMenu(QPointF at, bool onLocked) {
 
 void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path) {
     suggestedName_.clear();
+    if (pageStyle_) pageStyle_->close();  // it edits the editor going away
     canvas_->setNote(nullptr);
     if (note_) xn_note_close(note_);
     note_ = note;

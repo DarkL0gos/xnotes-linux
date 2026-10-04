@@ -7,6 +7,9 @@
 #include "PdfExport.h"
 #include "MainWindow.h"
 #include "NoteFinder.h"
+#include "PageStylePopup.h"
+
+#include <QAbstractButton>
 
 #include <QScrollBar>
 #include <QNativeGestureEvent>
@@ -688,6 +691,55 @@ private slots:
             QApplication::sendEvent(&canvas, &g);
         }
         QVERIFY2(xn_editor_zoom(canvas.editor()) > zoom * 1.4, qPrintable(QStringLiteral("%1 -> %2").arg(zoom).arg(xn_editor_zoom(canvas.editor()))));
+
+        canvas.setNote(nullptr);
+        xn_note_close(note);
+    }
+
+    /* The page background dialog: grid for the whole note, lines for one page, a cream paper. */
+    void pageBackground() {
+        xn_note* note = xn_note_new(2);
+        CanvasWidget canvas;
+        canvas.resize(800, 1000);
+        canvas.show();
+        canvas.setNote(note);
+        canvas.setDark(false);
+        // Rule pixels crossed by a vertical and by a horizontal scan through the page.
+        auto rules = [&](const QImage& img) {
+            auto grey = [&](int x, int y) {
+                const QColor c = img.pixelColor(x, y);
+                return c.red() < 245 && qAbs(c.red() - c.blue()) < 20 && c.red() > 120;
+            };
+            int across = 0, down = 0;
+            for (int y = 200; y < 800; y++) across += grey(400, y) && !grey(400, y - 1);
+            for (int x = 150; x < 650; x++) down += grey(x, 500) && !grey(x - 1, 500);
+            return std::pair(across, down);
+        };
+        QCOMPARE(rules(grab(canvas)), std::pair(0, 0));
+
+        PageStylePopup dialog(canvas.editor(), nullptr);
+        auto button = [&](const QString& text) {
+            for (QAbstractButton* b : dialog.findChildren<QAbstractButton*>())
+                if (b->text() == text) return b;
+            return static_cast<QAbstractButton*>(nullptr);
+        };
+        button(QStringLiteral("Клетка"))->click();
+        auto [across, down] = rules(grab(canvas));
+        QVERIFY2(across > 3 && down > 3, qPrintable(QStringLiteral("grid: %1 across, %2 down").arg(across).arg(down)));
+        QVERIFY(xn_note_is_dirty(note));
+
+        button(QStringLiteral("Текущая страница"))->click();
+        button(QStringLiteral("Линейка"))->click();
+        std::tie(across, down) = rules(grab(canvas));
+        QVERIFY2(across > 3 && down == 0, qPrintable(QStringLiteral("lines: %1 across, %2 down").arg(across).arg(down)));
+        xn_page_style all{};
+        xn_editor_page_style(canvas.editor(), 1, &all);
+        QCOMPARE(all.pattern, int(XN_PATTERN_GRID));
+
+        button(QStringLiteral("Все страницы"))->click();
+        xn_page_style cream{1, 0xF7F3E9FFu, XN_PATTERN_GRID, 0, 0, 0};
+        xn_editor_set_page_style(canvas.editor(), 1, &cream);
+        QCOMPARE(grab(canvas).pixelColor(160, 160), QColor(0xF7, 0xF3, 0xE9));
 
         canvas.setNote(nullptr);
         xn_note_close(note);

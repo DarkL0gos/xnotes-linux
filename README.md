@@ -25,6 +25,8 @@ input. Notes stay compatible with the Android app.
   any note to PDF.
 - **Quick on large screens**: while writing, only the part of the view the stroke changed is
   repainted (about 0.1 ms per pen sample at 3456×2304); PDF pages render in the background.
+- **Page backgrounds**: paper colour and ruling (lines, dots or grid, with spacing, colour and
+  opacity) for the whole note or a single page.
 - **Native Wayland scaling**, touchpad pinch zoom, scroll bars, dark and light paper.
 
 ## Building
@@ -75,6 +77,7 @@ undoes it.
 - [x] Qt app: pen pressure, tablet eraser and barrel buttons, mouse, touch, touchpad pinch
 - [x] Pen, highlighter, eraser, lasso and selection with its action bar, undo/redo, pages
 - [x] Text boxes and images
+- [x] Page background: paper colour and ruling (lines, dots, grid) for the note or one page
 - [x] PDF import with background rendering, PDF export
 - [x] Partial repaints while writing, fast zoom on large screens
 - [x] `.xnote` file type registration

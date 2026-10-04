@@ -6,6 +6,7 @@
 #include <QActionGroup>
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>
 #include <QTemporaryDir>
 
 #include <memory>
@@ -16,6 +17,7 @@ class QDoubleSpinBox;
 class QSpinBox;
 class QLabel;
 class QScrollBar;
+class PageStylePopup;
 class SelectionBar;
 
 class MainWindow : public QMainWindow {
@@ -46,6 +48,7 @@ private:
     QLabel* inputLabel_;
     bool dark_ = true;
     SelectionBar* selectionBar_;
+    QPointer<PageStylePopup> pageStyle_;
     QDoubleSpinBox* width_;
     QComboBox* face_;
     QSpinBox* textSize_;
