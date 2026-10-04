@@ -83,5 +83,6 @@ private:
     bool insertImageFile(const QString& path, QPointF at, bool atPoint);
     bool insertImage(const QString& file, QPointF at, bool atPoint);
     bool importPdf(const QString& path, std::unique_ptr<QTemporaryDir> workDir);
+    QString chooseExistingNote(const QString& pdf, const QStringList& notes, bool* cancelled);
     void exportPdf();
 };

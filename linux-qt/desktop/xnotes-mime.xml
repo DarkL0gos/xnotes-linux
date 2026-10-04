@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An .xnote is a ZIP inside, so without this file managers open it as an archive. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-xnote">
+    <comment>xnotes note</comment>
+    <comment xml:lang="ru">Заметка xnotes</comment>
+    <sub-class-of type="application/zip"/>
+    <generic-icon name="x-office-document"/>
+    <glob pattern="*.xnote"/>
+  </mime-type>
+</mime-info>

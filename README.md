@@ -133,3 +133,10 @@ cmake -S linux-qt -B linux-qt/build
 cmake --build linux-qt/build -j && ctest --test-dir linux-qt/build
 ./linux-qt/build/xnotes-qt [note.xnote]
 ```
+
+To open `.xnote` files from the file manager (otherwise it sees them as ZIP archives), register
+the file type and the app for your user; rerun after moving the build, `--remove` undoes it:
+
+```bash
+./linux-qt/desktop/install-desktop.sh
+```

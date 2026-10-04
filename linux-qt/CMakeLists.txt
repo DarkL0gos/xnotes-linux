@@ -13,6 +13,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Pdf Test)
+find_package(ZLIB REQUIRED)
 
 set(XNOTES_CAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../capi" CACHE PATH "The capi module (header and Gradle build output)")
 set(XNOTES_LIB "${XNOTES_CAPI_DIR}/build/bin/linuxX64/xnotesReleaseShared/libxnotes.so" CACHE FILEPATH "libxnotes.so")
@@ -43,9 +44,10 @@ add_library(xnotes_host STATIC
     src/MainWindow.cpp src/MainWindow.h
     src/SelectionBar.cpp src/SelectionBar.h
     src/TextOverlay.cpp src/TextOverlay.h
-    src/PdfExport.cpp src/PdfExport.h)
+    src/PdfExport.cpp src/PdfExport.h
+    src/NoteFinder.cpp src/NoteFinder.h)
 target_include_directories(xnotes_host PUBLIC src)
-target_link_libraries(xnotes_host PUBLIC Qt6::Widgets Qt6::Pdf xnotes_core)
+target_link_libraries(xnotes_host PUBLIC Qt6::Widgets Qt6::Pdf ZLIB::ZLIB xnotes_core)
 target_compile_options(xnotes_host PRIVATE -Wall -Wextra)
 
 add_executable(xnotes-qt src/main.cpp)
@@ -53,7 +55,6 @@ target_link_libraries(xnotes-qt PRIVATE xnotes_host)
 
 enable_testing()
 add_executable(xnotes_qt_smoke test/smoke_test.cpp)
-find_package(ZLIB REQUIRED)
 target_link_libraries(xnotes_qt_smoke PRIVATE xnotes_host Qt6::Test ZLIB::ZLIB)
 add_test(NAME smoke COMMAND xnotes_qt_smoke)
 set_tests_properties(smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

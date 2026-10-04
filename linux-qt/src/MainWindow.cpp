@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "CanvasWidget.h"
+#include "NoteFinder.h"
 #include "PdfExport.h"
 #include "SelectionBar.h"
 
@@ -8,7 +9,10 @@
 #include <QCloseEvent>
 #include <QClipboard>
 #include <QColorDialog>
+#include <QDateTime>
 #include <QGridLayout>
+#include <QInputDialog>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QImageReader>
 #include <QMimeData>
@@ -434,7 +438,17 @@ bool MainWindow::open(const QString& path) {
         QMessageBox::warning(this, QStringLiteral("Открыть"), QStringLiteral("Не удалось создать временную папку"));
         return false;
     }
-    if (path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) return importPdf(path, std::move(workDir));
+    if (path.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) {
+        // A note made from this PDF before is usually what is wanted, rather than a fresh one.
+        const QStringList notes = notesForPdf(path);
+        if (!notes.isEmpty()) {
+            bool cancelled = false;
+            const QString note = chooseExistingNote(path, notes, &cancelled);
+            if (cancelled) return false;
+            if (!note.isEmpty()) return open(note);
+        }
+        return importPdf(path, std::move(workDir));
+    }
     char* error = nullptr;
     const QByteArray file = QFile::encodeName(QFileInfo(path).absoluteFilePath());
     const QByteArray dir = QFile::encodeName(workDir->path());
@@ -445,6 +459,39 @@ bool MainWindow::open(const QString& path) {
     }
     install(note, std::move(workDir), QFileInfo(path).absoluteFilePath());
     return true;
+}
+
+/* Which of the notes made from the PDF to open; empty for a new one. */
+QString MainWindow::chooseExistingNote(const QString& pdf, const QStringList& notes, bool* cancelled) {
+    const QString pdfName = QFileInfo(pdf).fileName();
+    if (notes.size() == 1) {
+        QMessageBox box(QMessageBox::Question, QStringLiteral("Открыть PDF"),
+                        QStringLiteral("Для «%1» уже есть заметка «%2». Открыть её?").arg(pdfName, QFileInfo(notes.first()).fileName()),
+                        QMessageBox::NoButton, this);
+        QPushButton* openNote = box.addButton(QStringLiteral("Открыть заметку"), QMessageBox::AcceptRole);
+        QPushButton* fresh = box.addButton(QStringLiteral("Создать новую"), QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(openNote);
+        box.exec();
+        if (box.clickedButton() == openNote) return notes.first();
+        if (box.clickedButton() == fresh) return {};
+        *cancelled = true;
+        return {};
+    }
+    QStringList items;
+    for (const QString& n : notes)
+        items << QStringLiteral("%1 — изменена %2").arg(QFileInfo(n).fileName(), QFileInfo(n).lastModified().toString(QStringLiteral("dd.MM.yyyy HH:mm")));
+    const QString freshItem = QStringLiteral("Создать новую заметку");
+    items << freshItem;
+    bool ok = false;
+    const QString picked = QInputDialog::getItem(this, QStringLiteral("Открыть PDF"),
+                                                 QStringLiteral("Для «%1» уже есть заметки:").arg(pdfName), items, 0, false, &ok);
+    if (!ok) {
+        *cancelled = true;
+        return {};
+    }
+    const qsizetype index = items.indexOf(picked);
+    return picked == freshItem || index < 0 ? QString() : notes.at(index);
 }
 
 /* A new note over a copy of the PDF (the note embeds it when saved); saving asks for a name. */

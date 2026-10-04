@@ -6,6 +6,7 @@
 #include "TextOverlay.h"
 #include "PdfExport.h"
 #include "MainWindow.h"
+#include "NoteFinder.h"
 
 #include <QScrollBar>
 
@@ -436,6 +437,47 @@ private slots:
         QVERIFY(qAbs(sc[1] - vbar->maximum() / 2) <= 1);
         xn_editor_scroll_to(canvas->editor(), 0, 0);
         QCOMPARE(vbar->value(), 0);
+    }
+
+    /* Notes made from a PDF are found by name and, renamed, by the PDF they carry. */
+    void notesForPdf_() {
+        QTemporaryDir dir;
+        auto makePdf = [&](const QString& name, QColor color) {
+            const QString path = dir.filePath(name);
+            QPdfWriter writer(path);
+            QPainter p(&writer);
+            p.fillRect(QRectF(0, 0, 500, 500), color);
+            return path;
+        };
+        const QString a = makePdf(QStringLiteral("a.pdf"), Qt::red);
+        const QString b = makePdf(QStringLiteral("b.pdf"), Qt::blue);
+        QVERIFY(notesForPdf(a).isEmpty());
+
+        CanvasWidget canvas;
+        auto saveNoteOf = [&](const QString& pdf, const QString& name) {
+            QTemporaryDir work;
+            const QString copy = work.filePath(QStringLiteral("source.pdf"));
+            QFile::copy(pdf, copy);
+            char* error = nullptr;
+            xn_note* note = xn_note_import_pdf(QFile::encodeName(copy).constData(), canvas.host(), &error);
+            QVERIFY2(note, error);
+            QVERIFY(xn_note_save(note, QFile::encodeName(dir.filePath(name)).constData(), canvas.host(), &error));
+            xn_note_close(note);
+        };
+        saveNoteOf(a, QStringLiteral("renamed.xnote"));
+        saveNoteOf(b, QStringLiteral("b.xnote"));
+
+        const auto embedded = embeddedPdf(dir.filePath(QStringLiteral("renamed.xnote")));
+        QVERIFY(embedded && embedded->size == uint64_t(QFileInfo(a).size()));
+        QCOMPARE(notesForPdf(a), QStringList{dir.filePath(QStringLiteral("renamed.xnote"))});
+        QCOMPARE(notesForPdf(b), QStringList{dir.filePath(QStringLiteral("b.xnote"))});
+
+        // A note named after the PDF comes first, whatever it holds.
+        QFile::copy(dir.filePath(QStringLiteral("b.xnote")), dir.filePath(QStringLiteral("a.xnote")));
+        const QStringList both = notesForPdf(a);
+        QCOMPARE(both.size(), 2);
+        QCOMPARE(both.first(), dir.filePath(QStringLiteral("a.xnote")));
+        QVERIFY(!embeddedPdf(a));  // not a ZIP at all
     }
 
     void eraserEndErases() {
