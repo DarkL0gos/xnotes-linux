@@ -11,6 +11,7 @@
 
 #include <vector>
 
+class QOpenGLWidget;
 class QTabletEvent;
 class TextOverlay;
 class QTouchEvent;
@@ -18,8 +19,27 @@ class QTouchEvent;
 class CanvasWidget : public QWidget {
     Q_OBJECT
 public:
+    /* How frames reach the screen: composed on the GPU through OpenGL, or in memory by the CPU. */
+    enum class Render { Gl, Raster };
+    /* For canvases created from now on (main sets it from --gl / XNOTES_RENDER). */
+    static void setDefaultRender(Render render);
+    static Render defaultRender();
+
     explicit CanvasWidget(QWidget* parent = nullptr);
     ~CanvasWidget() override;
+
+    Render render() const { return gl_ ? Render::Gl : Render::Raster; }
+    /* Average time between the last frames, while they come back to back (ms; 0 when idle). */
+    double frameIntervalMs() const { return frameIntervalMs_; }
+
+    /*
+     * Paint one frame with p, whose units are logical pixels (the core works in device pixels).
+     * With keptFrame, p's target still holds the previous frame, and when the core allows it only
+     * the part that changed is repainted.
+     */
+    void renderFrame(QPainter& p, bool keptFrame = false);
+    /* The rect the last frame repainted (logical px), or an empty one when it was full. */
+    QRectF lastDamage() const { return lastDamage_; }
 
     /* The host services, also used to open and save notes. */
     const xn_host* host() const { return core_.host(); }
@@ -72,6 +92,10 @@ private:
     xn::CoreHost core_;
     xn_editor* editor_ = nullptr;
     TextOverlay* textOverlay_;
+    QOpenGLWidget* gl_ = nullptr;
+    QElapsedTimer sinceFrame_;
+    double frameIntervalMs_ = 0;
+    QRectF lastDamage_;
     QImage frame_;
     double dpr_ = 1.0;
     double lastFrameMs_ = 0;
@@ -90,6 +114,8 @@ private:
     std::vector<Touch> touches_;
 
     void updateViewport();
+    /* Schedule a frame on whichever surface shows the canvas. */
+    void requestFrame();
     int64_t now() const { return clock_.elapsed(); }
     QPointF device(QPointF logical) const { return logical * dpr_; }
     void send(int action, int actionIndex, int buttons, const std::vector<xn_pointer>& pointers, bool hover = false);

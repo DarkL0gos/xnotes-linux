@@ -395,6 +395,31 @@ int main(int argc, char** argv) {
     CHECK(xn_note_item_count(note, page) == 1, "undo removes the box");
     xn_editor_set_tool(ed, "pen");
 
+    /* v2: frame damage. Writing repaints only around the pen; anything else repaints in full. */
+    double dmg[4];
+    xn_editor_paint(ed, &hs.screen_target);
+    xn_editor_set_tool(ed, "pen");
+    xn_editor_paint(ed, &hs.screen_target);
+    pen(ed, XN_ACTION_DOWN, 300, 600, t + 600, 0, NULL, NULL);
+    xn_editor_paint(ed, &hs.screen_target);
+    for (int i = 1; i <= 30; i++) {
+        pen(ed, XN_ACTION_MOVE, 300 + i * 5, 600 + (i % 3), t + 600 + i * 4, 0, NULL, NULL);
+        if (i == 30) {
+            CHECK(xn_editor_frame_damage(ed, dmg) == 1, "a growing stroke damages part of the view");
+            CHECK(dmg[2] < 200 && dmg[3] < 200 && dmg[0] > 250 && dmg[0] + dmg[2] < 500,
+                  "around the pen: %g %g %g %g", dmg[0], dmg[1], dmg[2], dmg[3]);
+        }
+        xn_editor_paint(ed, &hs.screen_target);
+    }
+    pen(ed, XN_ACTION_UP, 450, 600, t + 740, 0, NULL, NULL);
+    CHECK(xn_editor_frame_damage(ed, dmg) == 0, "filing the stroke repaints in full");
+    xn_editor_paint(ed, &hs.screen_target);
+    xn_editor_scroll_by(ed, 0, 10);
+    CHECK(xn_editor_frame_damage(ed, dmg) == 0, "scrolling repaints in full");
+    xn_editor_scroll_by(ed, 0, -10);
+    xn_editor_paint(ed, &hs.screen_target);
+    xn_editor_undo(ed);
+
     /* v2: scroll bars. */
     double sc[6];
     xn_editor_scroll_info(ed, sc);

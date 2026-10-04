@@ -118,8 +118,11 @@ MainWindow::MainWindow() {
     auto* stats = new QTimer(this);
     connect(stats, &QTimer::timeout, this, [this] {
         const QString input = canvas_->lastInput();
+        const double interval = canvas_->frameIntervalMs();
         inputLabel_->setText((input.isEmpty() ? QString() : QStringLiteral("ввод: %1, давление %2   ").arg(input).arg(canvas_->lastPressure(), 0, 'f', 2)) +
-                             QStringLiteral("кадр %1 мс").arg(canvas_->lastFrameMs(), 0, 'f', 1));
+                             QStringLiteral("%1: кадр %2 мс").arg(canvas_->render() == CanvasWidget::Render::Gl ? QStringLiteral("GPU") : QStringLiteral("CPU"))
+                                 .arg(canvas_->lastFrameMs(), 0, 'f', 1) +
+                             (interval > 0 ? QStringLiteral(", %1 к/с").arg(int(std::lround(1000 / interval))) : QString()));
     });
     stats->start(250);
     resize(1200, 900);

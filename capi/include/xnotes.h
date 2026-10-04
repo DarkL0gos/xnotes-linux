@@ -222,6 +222,14 @@ void xn_editor_set_viewport(xn_editor* editor, int width, int height, double dev
 /* Paint a frame into renderer (the host's target for host->renderer). */
 void xn_editor_paint(xn_editor* editor, void* renderer);
 
+/*
+ * Whether the next frame may repaint only part of the view: 1 with that viewport rect when the
+ * only change since the last xn_editor_paint is a growing stroke (what writing does on every pen
+ * sample), so a host that kept the last frame can clip the next one to it; 0 for a full frame.
+ * Ask right before painting; the paint resets it.
+ */
+int xn_editor_frame_damage(const xn_editor* editor, double* out_xywh);
+
 /* A task posted through post_delayed/post_frame is due. */
 void xn_editor_run_task(xn_editor* editor, uint64_t task);
 

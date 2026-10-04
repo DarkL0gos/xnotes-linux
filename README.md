@@ -131,7 +131,7 @@ opens as a note over its pages, and notes export to PDF. Needs Qt 6 development 
 ./gradlew -PdesktopOnly=true :capi:linkXnotesReleaseSharedLinuxX64
 cmake -S linux-qt -B linux-qt/build
 cmake --build linux-qt/build -j && ctest --test-dir linux-qt/build
-./linux-qt/build/xnotes-qt [note.xnote]
+./linux-qt/build/xnotes-qt [note.xnote]   # --gl composes frames with OpenGL instead of the CPU
 ```
 
 To open `.xnote` files from the file manager (otherwise it sees them as ZIP archives), register

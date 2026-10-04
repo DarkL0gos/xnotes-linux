@@ -37,13 +37,16 @@ void PainterTarget::save() {
 
 void PainterTarget::saveLayer(const QRectF& bounds, double alpha, int blend) {
     QPainter* parent = painter();
-    // The layer covers the bounds in device space, clipped to what the parent can show.
+    // The layer covers the bounds in the parent's logical space, clipped to what the parent can
+    // show, at the device's pixel ratio so it is as sharp as the parent (a GL view is logical).
     QRect device = parent->transform().mapRect(bounds).toAlignedRect();
     if (parent->hasClipping()) device &= parent->transform().mapRect(parent->clipBoundingRect()).toAlignedRect();
     device &= QRect(0, 0, parent->device()->width(), parent->device()->height());
     if (device.isEmpty()) device = QRect(0, 0, 1, 1);
+    const double dpr = parent->device()->devicePixelRatioF();
     Layer layer;
-    layer.image = std::make_unique<QImage>(device.size(), QImage::Format_ARGB32_Premultiplied);
+    layer.image = std::make_unique<QImage>((QSizeF(device.size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
+    layer.image->setDevicePixelRatio(dpr);
     layer.image->fill(Qt::transparent);
     layer.painter = std::make_unique<QPainter>(layer.image.get());
     layer.painter->setRenderHints(parent->renderHints());
@@ -80,6 +83,7 @@ void PainterTarget::restore() {
 }
 
 void Surface::endPainting() {
+    // Painting gave the image a new cache key, so the OpenGL engine uploads it again.
     if (painter.isActive()) painter.end();
 }
 
@@ -279,11 +283,21 @@ void rDrawTextRun(void* r, const uint16_t* text, int len, double x, double basel
     p->restore();
 }
 
+
+}  // namespace
+#include <QElapsedTimer>
+#include <cstdio>
+struct ProfEntry { const char* name; double ms; long n; };
+ProfEntry gProf[32];
+extern "C" void xn_prof_dump() { for (auto& e : gProf) if (e.name && e.n) fprintf(stderr, "  %-16s %8.2f ms %7ld calls\n", e.name, e.ms, e.n); for (auto& e : gProf) { e.ms = 0; e.n = 0; } }
+namespace {
+template <int I, auto F> struct Timed;
+template <int I, typename R, typename... A, R (*F)(A...)> struct Timed<I, F> {
+    static R call(A... a) { QElapsedTimer t; t.start(); if constexpr (std::is_void_v<R>) { F(a...); gProf[I].ms += t.nsecsElapsed()/1e6; gProf[I].n++; } else { R r = F(a...); gProf[I].ms += t.nsecsElapsed()/1e6; gProf[I].n++; return r; } }
+};
+struct ProfInit { ProfInit() { gProf[0].name="rSave";gProf[1].name="rRestore";gProf[2].name="rSaveLayer";gProf[3].name="rTranslate";gProf[4].name="rScale";gProf[5].name="rRotate";gProf[6].name="rClipRect";gProf[7].name="rClear";gProf[8].name="rFillRect";gProf[9].name="rFillPolygon";gProf[10].name="rFillEllipse";gProf[11].name="rFillDiskRibbon";gProf[12].name="rStrokePolyline";gProf[13].name="rStrokeRect";gProf[14].name="rStrokeEllipse";gProf[15].name="rDrawSurface";gProf[16].name="rDrawImage";gProf[17].name="rDrawText";gProf[18].name="rDrawTextRun"; } } gProfInit;
 const xn_renderer_vt kVtable = {
-    rSave, rRestore, rSaveLayer, rTranslate, rScale, rRotate, rClipRect, rClear,
-    rFillRect, rFillPolygon, rFillEllipse, rFillDiskRibbon,
-    rStrokePolyline, rStrokeRect, rStrokeEllipse,
-    rDrawSurface, rDrawImage, rDrawText, rDrawTextRun,
+    Timed<0,rSave>::call, Timed<1,rRestore>::call, Timed<2,rSaveLayer>::call, Timed<3,rTranslate>::call, Timed<4,rScale>::call, Timed<5,rRotate>::call, Timed<6,rClipRect>::call, Timed<7,rClear>::call, Timed<8,rFillRect>::call, Timed<9,rFillPolygon>::call, Timed<10,rFillEllipse>::call, Timed<11,rFillDiskRibbon>::call, Timed<12,rStrokePolyline>::call, Timed<13,rStrokeRect>::call, Timed<14,rStrokeEllipse>::call, Timed<15,rDrawSurface>::call, Timed<16,rDrawImage>::call, Timed<17,rDrawText>::call, Timed<18,rDrawTextRun>::call,
 };
 
 CoreHost* H(void* ctx) { return static_cast<CoreHost*>(ctx); }

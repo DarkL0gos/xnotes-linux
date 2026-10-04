@@ -24,6 +24,8 @@ import com.xnotes.core.history.History
 import com.xnotes.core.model.CanvasItem
 import com.xnotes.core.model.Document
 import com.xnotes.core.model.Page
+import com.xnotes.core.model.Stroke
+import com.xnotes.canvas.FrontInkSink
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.platform.pathString
 import com.xnotes.core.pal.RasterSurface
@@ -145,7 +147,11 @@ internal class CNote(val document: Document)
 
 private fun COpaquePointer.note(): CNote = asStableRef<CNote>().get()
 
-private fun COpaquePointer.editor(): CEditor = asStableRef<CEditor>().get()
+/** The editor behind a handle, for a call that may change what is on screen: the next frame is a full one. */
+private fun COpaquePointer.editor(): CEditor = asStableRef<CEditor>().get().also { it.fullFrame = true }
+
+/** The editor, for input, painting and timers, which say themselves what they changed. */
+private fun COpaquePointer.editorQuiet(): CEditor = asStableRef<CEditor>().get()
 
 @CName("xn_api_version")
 fun xnApiVersion(): Int = 2
@@ -301,7 +307,11 @@ internal class CEditor(note: CNote, private val host: xn_host) {
     val state = CanvasState(note.document, surfaces, palette)
     val controller = InteractionController(
         state, history, CTextMeasurer(host),
-        requestRender = { host.request_render!!.invoke(host.ctx) },
+        // A render right after a wet-ink update is that update's; any other may have changed anything.
+        requestRender = {
+            if (inkJustGrew) inkJustGrew = false else fullFrame = true
+            host.request_render!!.invoke(host.ctx)
+        },
         scheduler = scheduler,
         chromePalette = { palette },
         onContentChanged = { host.content_changed!!.invoke(host.ctx) },
@@ -339,7 +349,7 @@ internal class CEditor(note: CNote, private val host: xn_host) {
     /** The locked item the last context menu was opened on. */
     var pressedLocked: CanvasItem? = null
     val editor = NoteEditor(state, history, controller, CTextMeasurer(host), object : NoteEditorHost {
-        override fun requestRender() = host.request_render!!.invoke(host.ctx)
+        override fun requestRender() = this@CEditor.requestRender()
         override fun contentChanged() = host.content_changed!!.invoke(host.ctx)
         override fun viewChanged() = host.view_changed!!.invoke(host.ctx)
         override fun notice(notice: EditorNotice) = host.notice!!.invoke(
@@ -361,10 +371,95 @@ internal class CEditor(note: CNote, private val host: xn_host) {
         controller.setTool(Tool.PEN)
     }
 
+    // --- frame damage ---
+    //
+    // Most frames while writing differ from the last only where the stroke grew. The controller
+    // reports each growth to its front-ink sink; this one draws nothing (live is false, so the
+    // canvas paints the stroke as usual) and only notes the screen rect the change can reach,
+    // so the host may repaint just that. Everything else makes the next frame a full one.
+
+    /** The next frame must repaint everything. */
+    var fullFrame = true
+
+    /** Viewport rect the frames since the last paint changed, when not [fullFrame]. */
+    private var damage: Rect? = null
+
+    /** Where the live stroke's moving part was drawn last, which its next growth repaints too. */
+    private var lastInk: Rect? = null
+
+    /** Set between a wet update and the render request that follows it. */
+    private var inkJustGrew = false
+
+    private val damageTracker = object : FrontInkSink {
+        override val live = false
+        override fun holding(item: CanvasItem) = false
+        override fun hold(item: CanvasItem, page: Page) = false
+        override fun holdFading(stroke: Stroke) = false
+
+        override fun wet(stroke: Stroke?, pageIndex: Int?) {
+            val rect = if (stroke != null && pageIndex != null) inkRect(stroke, pageIndex) else null
+            if (rect == null) {
+                fullFrame = true
+                lastInk = null
+                return
+            }
+            damage = listOfNotNull(damage, lastInk, rect).reduce { a, b -> a.union(b) }
+            lastInk = rect
+            inkJustGrew = true
+        }
+
+        override fun abandon() {
+            fullFrame = true
+            lastInk = null
+        }
+    }
+
+    init {
+        controller.frontInk = damageTracker
+    }
+
+    /**
+     * The viewport rect the live stroke's next frame can differ in: its unsettled tail (points
+     * before settledCount - 1 are final, which is what lets the wet cache bake them), or the whole
+     * stroke when its shape can change all along (taper, straight lines, neon's glow).
+     */
+    private fun inkRect(stroke: Stroke, pageIndex: Int): Rect? {
+        if (state.pageRects.getOrNull(pageIndex) == null) return null
+        val ribbon = stroke.wetRibbon
+        val local = if (ribbon != null && !stroke.config.neon && ribbon.pointCount > 0) {
+            var l = Double.MAX_VALUE
+            var t = Double.MAX_VALUE
+            var r = -Double.MAX_VALUE
+            var b = -Double.MAX_VALUE
+            for (i in maxOf(0, ribbon.settledCount - 2) until ribbon.pointCount) {
+                val hw = ribbon.hw(i)
+                l = minOf(l, ribbon.cx(i) - hw)
+                t = minOf(t, ribbon.cy(i) - hw)
+                r = maxOf(r, ribbon.cx(i) + hw)
+                b = maxOf(b, ribbon.cy(i) + hw)
+            }
+            Rect(l, t, r - l, b - t)
+        } else {
+            stroke.paintBounds()
+        }
+        val corners = listOf(Pt(local.left, local.top), Pt(local.right, local.top), Pt(local.left, local.bottom), Pt(local.right, local.bottom))
+            .map { state.contentToViewport(state.fromPageSpace(pageIndex, it)) }
+        // Antialiasing and rounding spill a little past the geometry.
+        return Rect.bounding(corners).outset(INK_DAMAGE_PAD)
+    }
+
+    /** The rect the next frame may limit itself to, or null for a full frame. */
+    fun frameDamage(): Rect? = if (fullFrame) null else damage
+
+    fun requestRender() {
+        fullFrame = true
+        host.request_render!!.invoke(host.ctx)
+    }
+
     /** Zoom or scroll moved outside a gesture: the host refreshes its view and repaints. */
     fun viewChanged() {
         host.view_changed!!.invoke(host.ctx)
-        host.request_render!!.invoke(host.ctx)
+        requestRender()
     }
 
     fun setViewport(width: Int, height: Int, pxPerDp: Double) {
@@ -375,9 +470,12 @@ internal class CEditor(note: CNote, private val host: xn_host) {
         state.relayout()
         if (!state.didInitialFit) state.establishInitialView() else if (resized) state.reflowFitWidthForResize()
         state.clampScroll()
+        fullFrame = true
     }
 
     fun paint(target: COpaquePointer?) {
+        damage = null
+        fullFrame = false
         surfaces.drain()
         val r = CRenderer(host.renderer!!.pointed, target)
         val frame = CanvasFramePainter.paint(r, state)
@@ -391,12 +489,10 @@ internal class CEditor(note: CNote, private val host: xn_host) {
         palette = p
         state.palette = p
         state.invalidateAllCaches()
-        host.request_render!!.invoke(host.ctx)
+        requestRender()
     }
 
     fun runTask(id: ULong) = scheduler.run(id)
-
-    fun requestRender() = host.request_render!!.invoke(host.ctx)
 
     fun dispose() {
         scheduler.cancelAll()
@@ -406,6 +502,7 @@ internal class CEditor(note: CNote, private val host: xn_host) {
 
     private companion object {
         const val SHARP_SETTLE_MS = 90L
+        const val INK_DAMAGE_PAD = 4.0
     }
 }
 
@@ -434,10 +531,20 @@ fun xnEditorSetViewport(editor: COpaquePointer?, width: Int, height: Int, pxPerD
     guard(Unit) { editor!!.editor().setViewport(width, height, pxPerDp) }
 
 @CName("xn_editor_paint")
-fun xnEditorPaint(editor: COpaquePointer?, renderer: COpaquePointer?) = guard(Unit) { editor!!.editor().paint(renderer) }
+fun xnEditorPaint(editor: COpaquePointer?, renderer: COpaquePointer?) = guard(Unit) { editor!!.editorQuiet().paint(renderer) }
+
+@CName("xn_editor_frame_damage")
+fun xnEditorFrameDamage(editor: COpaquePointer?, out: CPointer<DoubleVar>?): Int = guard(0) {
+    val rect = editor!!.editorQuiet().frameDamage() ?: return@guard 0
+    out!![0] = rect.x
+    out[1] = rect.y
+    out[2] = rect.w
+    out[3] = rect.h
+    1
+}
 
 @CName("xn_editor_run_task")
-fun xnEditorRunTask(editor: COpaquePointer?, task: ULong) = guard(Unit) { editor!!.editor().runTask(task) }
+fun xnEditorRunTask(editor: COpaquePointer?, task: ULong) = guard(Unit) { editor!!.editorQuiet().runTask(task) }
 
 private fun event(e: xn_pointer_event): SimplePointerEvent {
     fun sample(p: xn_pointer) = PointerSample(p.id, p.x, p.y, p.pressure, p.tool_type)
@@ -450,12 +557,12 @@ private fun event(e: xn_pointer_event): SimplePointerEvent {
 
 @CName("xn_editor_touch")
 fun xnEditorTouch(editor: COpaquePointer?, e: CPointer<xn_pointer_event>?) = guard(Unit) {
-    editor!!.editor().controller.onTouch(event(e!!.pointed))
+    editor!!.editorQuiet().controller.onTouch(event(e!!.pointed))
 }
 
 @CName("xn_editor_hover")
 fun xnEditorHover(editor: COpaquePointer?, e: CPointer<xn_pointer_event>?) = guard(Unit) {
-    editor!!.editor().controller.onHover(event(e!!.pointed))
+    editor!!.editorQuiet().controller.onHover(event(e!!.pointed))
 }
 
 @CName("xn_editor_set_tool")
@@ -481,10 +588,10 @@ fun xnEditorRedo(editor: COpaquePointer?) = guard(Unit) {
 }
 
 @CName("xn_editor_can_undo")
-fun xnEditorCanUndo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editor().history.canUndo) 1 else 0 }
+fun xnEditorCanUndo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().history.canUndo) 1 else 0 }
 
 @CName("xn_editor_can_redo")
-fun xnEditorCanRedo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editor().history.canRedo) 1 else 0 }
+fun xnEditorCanRedo(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().history.canRedo) 1 else 0 }
 
 @CName("xn_editor_escape")
 fun xnEditorEscape(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().controller.escape() }
@@ -514,7 +621,7 @@ fun xnEditorScrollBy(editor: COpaquePointer?, dx: Double, dy: Double) = guard(Un
 
 @CName("xn_editor_scroll_info")
 fun xnEditorScrollInfo(editor: COpaquePointer?, out: CPointer<DoubleVar>?) = guard(Unit) {
-    val st = editor!!.editor().state
+    val st = editor!!.editorQuiet().state
     out!![0] = st.scrollX
     out[1] = st.scrollY
     out[2] = st.maxScrollX()
@@ -537,10 +644,10 @@ fun xnEditorFitWidth(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().
 fun xnEditorGoToPage(editor: COpaquePointer?, index: Int) = guard(Unit) { editor!!.editor().editor.goToPage(index) }
 
 @CName("xn_editor_current_page")
-fun xnEditorCurrentPage(editor: COpaquePointer?): Int = guard(0) { editor!!.editor().state.currentPageIndex() }
+fun xnEditorCurrentPage(editor: COpaquePointer?): Int = guard(0) { editor!!.editorQuiet().state.currentPageIndex() }
 
 @CName("xn_editor_zoom")
-fun xnEditorZoom(editor: COpaquePointer?): Double = guard(1.0) { editor!!.editor().state.zoom }
+fun xnEditorZoom(editor: COpaquePointer?): Double = guard(1.0) { editor!!.editorQuiet().state.zoom }
 
 @CName("xn_editor_set_palette")
 fun xnEditorSetPalette(editor: COpaquePointer?, palette: CPointer<xn_palette>?) = guard(Unit) {
@@ -561,12 +668,12 @@ private val toolNames = HashMap<Tool, CPointer<ByteVar>>()
 private fun toolName(t: Tool): CPointer<ByteVar>? = toolNames.getOrPut(t) { strdup(t.id)!! }
 
 @CName("xn_editor_tool")
-fun xnEditorTool(editor: COpaquePointer?): CPointer<ByteVar>? = guard(null) { toolName(editor!!.editor().controller.tool) }
+fun xnEditorTool(editor: COpaquePointer?): CPointer<ByteVar>? = guard(null) { toolName(editor!!.editorQuiet().controller.tool) }
 
 @CName("xn_editor_tool_width")
 fun xnEditorToolWidth(editor: COpaquePointer?, toolId: String?): Double = guard(0.0) {
     val tool = Tool.fromId(toolId) ?: return@guard 0.0
-    editor!!.editor().controller.configFor(tool).baseWidth
+    editor!!.editorQuiet().controller.configFor(tool).baseWidth
 }
 
 @CName("xn_editor_set_tool_width")
@@ -607,7 +714,7 @@ internal fun fillField(f: xn_text_field, field: EditingField) {
 
 @CName("xn_editor_text_field")
 fun xnEditorTextField(editor: COpaquePointer?, out: CPointer<xn_text_field>?): Int = guard(0) {
-    val field = editor!!.editor().controller.editingField() ?: return@guard 0
+    val field = editor!!.editorQuiet().controller.editingField() ?: return@guard 0
     fillField(out!!.pointed, field)
     1
 }
@@ -641,11 +748,11 @@ fun xnEditorInsertImage(editor: COpaquePointer?, path: String?, atPoint: Int, x:
 }
 
 @CName("xn_editor_has_selection")
-fun xnEditorHasSelection(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editor().controller.hasSelection) 1 else 0 }
+fun xnEditorHasSelection(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().controller.hasSelection) 1 else 0 }
 
 @CName("xn_editor_selection_rect")
 fun xnEditorSelectionRect(editor: COpaquePointer?, out: CPointer<DoubleVar>?): Int = guard(0) {
-    val rect = editor!!.editor().controller.selectionMenuRect() ?: return@guard 0
+    val rect = editor!!.editorQuiet().controller.selectionMenuRect() ?: return@guard 0
     out!![0] = rect.x
     out[1] = rect.y
     out[2] = rect.w
@@ -682,7 +789,7 @@ fun xnEditorUnlockPressed(editor: COpaquePointer?) = guard(Unit) {
 }
 
 @CName("xn_editor_can_paste")
-fun xnEditorCanPaste(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editor().controller.hasClipboardItems()) 1 else 0 }
+fun xnEditorCanPaste(editor: COpaquePointer?): Int = guard(0) { if (editor!!.editorQuiet().controller.hasClipboardItems()) 1 else 0 }
 
 @CName("xn_editor_paste_at")
 fun xnEditorPasteAt(editor: COpaquePointer?, x: Double, y: Double) = guard(Unit) {
@@ -692,7 +799,7 @@ fun xnEditorPasteAt(editor: COpaquePointer?, x: Double, y: Double) = guard(Unit)
 
 @CName("xn_editor_selection_style")
 fun xnEditorSelectionStyle(editor: COpaquePointer?, color: CPointer<UIntVar>?, width: CPointer<DoubleVar>?): Int = guard(0) {
-    val styles = editor!!.editor().controller.selectionStyles()
+    val styles = editor!!.editorQuiet().controller.selectionStyles()
     val first = styles.firstOrNull() ?: return@guard 0
     val shared = first.color.takeIf { c -> styles.all { it.color == c } } ?: first.color
     color?.pointed?.value = shared.packed()

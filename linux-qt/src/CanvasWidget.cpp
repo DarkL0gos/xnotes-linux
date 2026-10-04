@@ -3,6 +3,8 @@
 #include "TextOverlay.h"
 
 #include <QMimeData>
+#include <QOpenGLWidget>
+#include <QSurfaceFormat>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointingDevice>
@@ -13,6 +15,41 @@
 #include <cmath>
 
 namespace {
+
+/* The canvas on the GPU: QPainter over Qt's OpenGL engine, multisampled for smooth ink; page caches
+   become textures, uploaded again only when they change. Input passes through to the canvas. */
+class GlView : public QOpenGLWidget {
+public:
+    explicit GlView(CanvasWidget* canvas) : QOpenGLWidget(canvas), canvas_(canvas) {
+        QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+        format.setSamples(4);
+        setFormat(format);
+        // Keep the framebuffer between frames, so a frame can repaint just what changed.
+        setUpdateBehavior(QOpenGLWidget::PartialUpdate);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFocusPolicy(Qt::NoFocus);
+        setGeometry(canvas->rect());
+    }
+
+protected:
+    void resizeGL(int, int) override { fresh_ = true; }
+
+    void paintGL() override {
+        QPainter p(this);
+        canvas_->renderFrame(p, !fresh_);
+        fresh_ = false;
+    }
+
+private:
+    CanvasWidget* canvas_;
+    bool fresh_ = true;  // a new framebuffer holds nothing to keep
+};
+
+// Writing repaints only around the pen, which the CPU does in a fraction of a millisecond, while a
+// GL frame pays for the whole framebuffer every time (measured on Iris Xe at 3456x2304: CPU
+// 0.1 ms, GL 10 ms per pen sample); so the CPU unless asked otherwise.
+CanvasWidget::Render gDefaultRender =
+    qgetenv("XNOTES_RENDER") == "gl" ? CanvasWidget::Render::Gl : CanvasWidget::Render::Raster;
 
 constexpr double kWheelStepPx = 60.0;   // one notch, in logical pixels
 constexpr double kZoomPerNotch = 1.1;
@@ -41,13 +78,17 @@ CanvasWidget::CanvasWidget(QWidget* parent) : QWidget(parent) {
     clock_.start();
 
     core_.runTask = [this](uint64_t task) { if (editor_) xn_editor_run_task(editor_, task); };
-    core_.onRender = [this] { update(); };
+    core_.onRender = [this] { requestFrame(); };
     core_.onContentChanged = [this] { emit contentChanged(); };
     core_.onViewChanged = [this] {
-        update();
+        requestFrame();
         textOverlay_->reposition();
         emit viewChanged();
     };
+    if (defaultRender() == Render::Gl) {
+        gl_ = new GlView(this);
+        gl_->lower();  // under the text field and the selection bar
+    }
     textOverlay_ = new TextOverlay(this);
     core_.onTextEdit = [this](const xn_text_field* field) { textOverlay_->onTextEdit(field); };
     core_.onNotice = [this](int code) { emit notice(code); };
@@ -61,6 +102,9 @@ CanvasWidget::CanvasWidget(QWidget* parent) : QWidget(parent) {
     };
 }
 
+void CanvasWidget::setDefaultRender(Render render) { gDefaultRender = render; }
+CanvasWidget::Render CanvasWidget::defaultRender() { return gDefaultRender; }
+
 CanvasWidget::~CanvasWidget() { setNote(nullptr); }
 
 void CanvasWidget::setNote(xn_note* note) {
@@ -71,10 +115,11 @@ void CanvasWidget::setNote(xn_note* note) {
     textOverlay_->onTextEdit(nullptr);
     penDown_ = mouseDown_ = panning_ = false;
     touches_.clear();
+    requestFrame();
     if (!note) return;
     editor_ = xn_editor_create(note, core_.host());
     updateViewport();
-    update();
+    requestFrame();
 }
 
 void CanvasWidget::setTool(const char* toolId) {
@@ -124,7 +169,7 @@ bool CanvasWidget::event(QEvent* e) {
         return true;
     case QEvent::DevicePixelRatioChange:
         updateViewport();
-        update();
+        requestFrame();
         break;
     default:
         break;
@@ -132,27 +177,64 @@ bool CanvasWidget::event(QEvent* e) {
     return QWidget::event(e);
 }
 
-void CanvasWidget::resizeEvent(QResizeEvent*) { updateViewport(); }
+void CanvasWidget::resizeEvent(QResizeEvent*) {
+    if (gl_) gl_->setGeometry(rect());
+    updateViewport();
+}
+
+void CanvasWidget::requestFrame() {
+    if (gl_) return gl_->update();
+    // In memory the frame persists, so only the changed part has to reach the window.
+    double d[4];
+    if (editor_ && xn_editor_frame_damage(editor_, d)) {
+        update(QRectF(d[0] / dpr_, d[1] / dpr_, d[2] / dpr_, d[3] / dpr_).toAlignedRect().adjusted(-1, -1, 1, 1));
+    } else {
+        update();
+    }
+}
+
+void CanvasWidget::renderFrame(QPainter& p, bool keptFrame) {
+    lastDamage_ = QRectF();
+    if (!editor_) {
+        p.fillRect(QRectF(0, 0, width(), height()), QColor(0x0a, 0x0a, 0x0a));
+        return;
+    }
+    double d[4];
+    if (keptFrame && xn_editor_frame_damage(editor_, d)) {
+        lastDamage_ = QRectF(d[0] / dpr_, d[1] / dpr_, d[2] / dpr_, d[3] / dpr_);
+        p.setClipRect(lastDamage_);
+    }
+    const qint64 since = sinceFrame_.isValid() ? sinceFrame_.restart() : (sinceFrame_.start(), 0);
+    // Frames closer than 100 ms apart are a run (drawing, panning); a longer gap starts a new one.
+    frameIntervalMs_ = since > 0 && since < 100 ? (frameIntervalMs_ > 0 ? frameIntervalMs_ * 0.8 + since * 0.2 : since) : 0;
+    QElapsedTimer t;
+    t.start();
+    p.save();
+    p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    p.scale(1 / dpr_, 1 / dpr_);
+    xn::PainterTarget target(&p);
+    xn_editor_paint(editor_, &target);
+    p.restore();
+    lastFrameMs_ = t.nsecsElapsed() / 1e6;
+}
 
 void CanvasWidget::paintEvent(QPaintEvent*) {
+    if (gl_) return;  // the GL view covers the canvas
     QPainter out(this);
     if (!editor_) {
         out.fillRect(rect(), QColor(0x0a, 0x0a, 0x0a));
         return;
     }
+    // Composed in memory at device resolution, one frame pixel per device pixel, then blitted.
     const QSize size(int(std::ceil(width() * dpr_)), int(std::ceil(height() * dpr_)));
-    if (frame_.size() != size) frame_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
-    QElapsedTimer t;
-    t.start();
+    const bool kept = frame_.size() == size;
+    if (!kept) frame_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
     {
         QPainter p(&frame_);
-        p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
-        xn::PainterTarget target(&p);
-        xn_editor_paint(editor_, &target);
+        p.scale(dpr_, dpr_);  // renderFrame works in logical pixels
+        renderFrame(p, kept);
     }
-    // One frame pixel per device pixel (the frame keeps ratio 1 so the core's painter is unscaled).
     out.drawImage(QRectF(0, 0, size.width() / dpr_, size.height() / dpr_), frame_);
-    lastFrameMs_ = t.nsecsElapsed() / 1e6;
 }
 
 void CanvasWidget::send(int action, int actionIndex, int buttons, const std::vector<xn_pointer>& pointers, bool hover) {

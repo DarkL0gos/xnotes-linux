@@ -9,6 +9,10 @@
 #include "NoteFinder.h"
 
 #include <QScrollBar>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QOpenGLFramebufferObject>
+#include <QOpenGLPaintDevice>
 
 #include <QPdfDocument>
 #include <QPdfWriter>
@@ -44,6 +48,69 @@ static bool writeNote(const QString& path, const QByteArray& manifest) {
     return f.open(QIODevice::WriteOnly) && f.write(local + central + end) > 0;
 }
 
+/*
+ * A frame target that keeps its pixels between frames, as the window's frame does: an image, or
+ * a multisampled framebuffer on the OpenGL engine for the GL path.
+ */
+class KeptTarget {
+public:
+    KeptTarget(CanvasWidget& canvas, bool gl) : canvas_(canvas), gl_(gl) {
+        const QSize size = (QSizeF(canvas.size()) * canvas.devicePixelRatioF()).toSize();
+        if (!gl) {
+            image_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
+            return;
+        }
+        static QOpenGLContext* context = nullptr;
+        static QOffscreenSurface* surface = nullptr;
+        if (!context) {
+            context = new QOpenGLContext;
+            surface = new QOffscreenSurface;
+            surface->create();
+            context->create();
+        }
+        context_ = context;
+        surface_ = surface;
+        context_->makeCurrent(surface_);
+        QOpenGLFramebufferObjectFormat format;
+        format.setSamples(4);
+        format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+        fbo_ = std::make_unique<QOpenGLFramebufferObject>(size, format);
+    }
+
+    KeptTarget& frame(bool keep) {
+        if (!gl_) {
+            QPainter p(&image_);
+            p.scale(canvas_.devicePixelRatioF(), canvas_.devicePixelRatioF());
+            canvas_.renderFrame(p, keep);
+            return *this;
+        }
+        context_->makeCurrent(surface_);
+        fbo_->bind();
+        QOpenGLPaintDevice device(fbo_->size());
+        device.setDevicePixelRatio(canvas_.devicePixelRatioF());
+        {
+            QPainter p(&device);
+            canvas_.renderFrame(p, keep);
+        }
+        fbo_->release();
+        return *this;
+    }
+
+    QImage image() {
+        if (!gl_) return image_.convertToFormat(QImage::Format_RGB32);
+        context_->makeCurrent(surface_);
+        return fbo_->toImage().convertToFormat(QImage::Format_RGB32);
+    }
+
+private:
+    CanvasWidget& canvas_;
+    bool gl_;
+    QImage image_;
+    QOpenGLContext* context_ = nullptr;
+    QOffscreenSurface* surface_ = nullptr;
+    std::unique_ptr<QOpenGLFramebufferObject> fbo_;
+};
+
 /* QTest::wheelEvent does not exist; a wheel notch as a mouse produces it. */
 namespace QTest {
 inline void wheelEvent(QWidget* w, QPointF at, QPoint angle) {
@@ -71,7 +138,42 @@ class SmokeTest : public QObject {
     static QImage grab(CanvasWidget& c) {
         c.grab();
         QTest::qWait(200);
+        if (c.render() == CanvasWidget::Render::Gl) return glFrame(c);
         return c.grab().toImage().convertToFormat(QImage::Format_RGB32);
+    }
+
+    /*
+     * The GL path's frame: the offscreen platform cannot host a QOpenGLWidget, so the frame is
+     * drawn the way the widget draws it, through renderFrame into a multisampled framebuffer on
+     * Qt's OpenGL paint engine. One context for the whole run, so its texture cache carries over
+     * between frames as it does on screen.
+     */
+    static QImage glFrame(CanvasWidget& c) {
+        static QOpenGLContext* context = nullptr;
+        static QOffscreenSurface* surface = nullptr;
+        if (!context) {
+            context = new QOpenGLContext;
+            surface = new QOffscreenSurface;
+            surface->create();
+            if (!context->create()) qFatal("no OpenGL context");
+        }
+        context->makeCurrent(surface);
+        QOpenGLFramebufferObjectFormat format;
+        format.setSamples(4);
+        format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+        const double dpr = c.devicePixelRatioF();
+        QOpenGLFramebufferObject fbo((QSizeF(c.size()) * dpr).toSize(), format);
+        fbo.bind();
+        QOpenGLPaintDevice device(fbo.size());
+        device.setDevicePixelRatio(dpr);
+        {
+            QPainter p(&device);
+            c.renderFrame(p);
+        }
+        QImage image = fbo.toImage().convertToFormat(QImage::Format_RGB32);
+        fbo.release();
+        context->doneCurrent();
+        return image;
     }
 
     static int inkPixels(const QImage& img, QRect area) {
@@ -478,6 +580,68 @@ private slots:
         QCOMPARE(both.size(), 2);
         QCOMPARE(both.first(), dir.filePath(QStringLiteral("a.xnote")));
         QVERIFY(!embeddedPdf(a));  // not a ZIP at all
+    }
+
+    /*
+     * Frames while writing repaint only where the stroke grew. Painted that way frame after frame
+     * into one kept target, the result must be the full frame, for ink and for the highlighter's
+     * multiply layer, on whichever path this run renders.
+     */
+    void partialFramesMatchFull() {
+        xn_note* note = xn_note_new(1);
+        CanvasWidget canvas;
+        canvas.resize(700, 900);
+        canvas.show();
+        canvas.setNote(note);
+        canvas.setDark(false);
+        QTest::qWait(250);
+        const bool gl = canvas.render() == CanvasWidget::Render::Gl;
+        KeptTarget kept(canvas, gl);
+        KeptTarget(canvas, gl).frame(false);  // settle caches
+
+        auto stroke = [&](const char* tool, xn_rgba color, double y) {
+            canvas.setTool(tool);
+            xn_editor_set_ink_color(canvas.editor(), color);
+            kept.frame(true);  // full: tool and colour changed
+            tablet(&canvas, QEvent::TabletPress, {100, y}, 0.5, Qt::LeftButton, Qt::LeftButton);
+            int partial = 0;
+            double area = 0;
+            for (int i = 1; i <= 120; i++) {
+                tablet(&canvas, QEvent::TabletMove, {100 + i * 4.0, y + 25 * std::sin(i * 0.15)}, 0.3 + (i % 20) * 0.03, Qt::NoButton, Qt::LeftButton);
+                kept.frame(true);
+                if (!canvas.lastDamage().isEmpty()) {
+                    partial++;
+                    area += canvas.lastDamage().width() * canvas.lastDamage().height();
+                }
+            }
+            const QImage incremental = kept.image();
+            const QImage full = KeptTarget(canvas, gl).frame(false).image();
+            // The settled run is baked into a raster while it stays on screen as it was drawn live,
+            // so edges may differ by antialiasing; missing or extra ink would differ by far more.
+            int edges = 0, wrong = 0;
+            for (int yy = 0; yy < full.height(); yy++)
+                for (int xx = 0; xx < full.width(); xx++) {
+                    const QColor a = full.pixelColor(xx, yy), b = incremental.pixelColor(xx, yy);
+                    const int d = std::max({qAbs(a.red() - b.red()), qAbs(a.green() - b.green()), qAbs(a.blue() - b.blue())});
+                    if (d > 128) wrong++;
+                    else if (d > 32) edges++;
+                }
+            if (wrong > 0 && qEnvironmentVariableIsSet("XNOTES_SMOKE_SHOT")) {
+                incremental.save(qEnvironmentVariable("XNOTES_SMOKE_SHOT") + "-inc.png");
+                full.save(qEnvironmentVariable("XNOTES_SMOKE_SHOT") + "-full.png");
+            }
+            tablet(&canvas, QEvent::TabletRelease, {580, y}, 0, Qt::LeftButton, Qt::NoButton);
+            QVERIFY2(wrong == 0, qPrintable(QStringLiteral("%1: %2 pixels wrong").arg(tool).arg(wrong)));
+            QVERIFY2(edges < 600, qPrintable(QStringLiteral("%1: %2 edge pixels differ").arg(tool).arg(edges)));
+            QVERIFY2(partial > 100, qPrintable(QStringLiteral("%1: %2 partial frames").arg(tool).arg(partial)));
+            QVERIFY2(area / partial < 0.1 * canvas.width() * canvas.height(), "partial frames are small");
+            kept.frame(true);
+            QVERIFY(canvas.lastDamage().isEmpty());  // filing the stroke repaints in full
+        };
+        stroke("pen", 0x1060c0ff, 300);
+        stroke("highlighter", 0xffeb3bff, 310);  // across the ink
+        canvas.setNote(nullptr);
+        xn_note_close(note);
     }
 
     void eraserEndErases() {
