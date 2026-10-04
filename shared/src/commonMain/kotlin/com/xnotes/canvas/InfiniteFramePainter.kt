@@ -140,7 +140,11 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
         val iy1 = floor(visible.bottom / cs).toLong()
 
         // Render what may be rendered now (nothing while the zoom is moving), then see what is there.
-        val deadline = monotonicNanos() + budgetNanos
+        // With the view where it was, the missing tiles are ones an edit dropped: a handful, and
+        // all rendered now, or the stand-in (which predates the edit) would show ink blink out.
+        val sameView = s != null && s.zoom == zoom && s.scrollX == viewport.scrollX && s.scrollY == viewport.scrollY &&
+            s.surface.width == w && s.surface.height == h
+        val deadline = if (sameView) Long.MAX_VALUE else monotonicNanos() + budgetNanos
         renderedLastFrame = 0
         val ready = ArrayList<Pair<Key, Tile>>()
         val absent = ArrayList<Key>()
@@ -170,6 +174,10 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
             br.scale(zoom, zoom)
             br.translate(-viewport.scrollX, -viewport.scrollY)
             for ((key, tile) in ready) br.drawRaster(tile.surface, rectOf(key))
+            for (item in doc.itemsIn(visible)) {
+                if (item.isHighlighterInk() && !skip(item)) item.paint(br)
+            }
+            // Last, so the stand-in's own highlighters are not multiplied a second time.
             if (standIn != null) {
                 for (key in absent) {
                     br.save()
@@ -179,9 +187,6 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
                     br.drawRaster(standIn.surface, standInRect(standIn))
                     br.restore()
                 }
-            }
-            for (item in doc.itemsIn(visible)) {
-                if (item.isHighlighterInk() && !skip(item)) item.paint(br)
             }
             br.restore()
         }

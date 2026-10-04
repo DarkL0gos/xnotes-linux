@@ -888,6 +888,61 @@ private slots:
         QVERIFY(action(QStringLiteral("+ Страница"))->isVisible());
     }
 
+    /*
+     * On a canvas the ink must not blink when the pen lifts: the first frame after the stroke is
+     * filed already shows it from the tiles, for ink and for the highlighter, and every frame after.
+     */
+    void canvasInkStaysOnPenUp() {
+        xn_note* note = xn_canvas_new();
+        CanvasWidget canvas;
+        canvas.resize(1200, 900);
+        canvas.show();
+        canvas.setNote(note);
+        canvas.setDark(false);
+        xn_page_style plain{1, 0xFFFFFFFFu, XN_PATTERN_NONE, 0, 0, 0};
+        xn_editor_set_page_style(canvas.editor(), 1, &plain);
+        const bool gl = canvas.render() == CanvasWidget::Render::Gl;
+        // A dense canvas, so its tiles take real time to render.
+        canvas.setTool("pen");
+        xn_editor_set_ink_color(canvas.editor(), 0x808080ffu);
+        for (int k = 0; k < 1500; k++) {
+            const double x0 = 20 + (k % 50) * 23, y0 = 20 + (k / 50) * 29;
+            tablet(&canvas, QEvent::TabletPress, {x0, y0}, 0.5, Qt::LeftButton, Qt::LeftButton);
+            for (int i = 1; i <= 10; i++) tablet(&canvas, QEvent::TabletMove, {x0 + i * 2, y0 + 5 * std::sin(i)}, 0.5, Qt::NoButton, Qt::LeftButton);
+            tablet(&canvas, QEvent::TabletRelease, {x0 + 20, y0}, 0, Qt::LeftButton, Qt::NoButton);
+        }
+        KeptTarget(canvas, gl).frame(false);
+        // Ink across several tiles (512 px each), so a budgeted frame could not render them all.
+        // As the app does: frames until every tile in view is rendered.
+        auto settle = [&] {
+            for (int f = 0; f < 20; f++) KeptTarget(canvas, gl).frame(false);
+        };
+        // Inked columns: where the frame differs from the one before the stroke (the highlighter
+        // tints whatever is under it, the grey ink included).
+        auto line = [&](const char* tool, xn_rgba color, double y) {
+            canvas.setTool(tool);
+            xn_editor_set_ink_color(canvas.editor(), color);
+            settle();
+            const QImage before = KeptTarget(canvas, gl).frame(false).image();
+            tablet(&canvas, QEvent::TabletPress, {50, y}, 0.6, Qt::LeftButton, Qt::LeftButton);
+            for (int i = 1; i <= 110; i++) tablet(&canvas, QEvent::TabletMove, {50 + i * 10.0, y + (i % 2)}, 0.6, Qt::NoButton, Qt::LeftButton);
+            tablet(&canvas, QEvent::TabletRelease, {1150, y}, 0, Qt::LeftButton, Qt::NoButton);
+            for (int f = 0; f < 4; f++) {
+                const QImage img = KeptTarget(canvas, gl).frame(false).image();
+                int n = 0;
+                for (int x = 100; x < 1100; x++) {
+                    const QColor a = before.pixelColor(x, int(y)), b = img.pixelColor(x, int(y));
+                    n += qAbs(a.red() - b.red()) + qAbs(a.green() - b.green()) + qAbs(a.blue() - b.blue()) > 40;
+                }
+                QVERIFY2(n > 900, qPrintable(QStringLiteral("%1, frame %2 after pen up: %3 of 1000 columns inked").arg(tool).arg(f).arg(n)));
+            }
+        };
+        line("pen", 0xd02020ffu, 300);
+        line("highlighter", 0x2090f0ffu, 600);
+        canvas.setNote(nullptr);
+        xn_note_close(note);
+    }
+
     void eraserEndErases() {
         xn_note* note = xn_note_new(1);
         CanvasWidget canvas;

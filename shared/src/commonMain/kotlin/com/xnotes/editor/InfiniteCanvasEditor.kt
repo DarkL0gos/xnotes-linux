@@ -6,6 +6,7 @@ import com.xnotes.canvas.InfiniteFramePainter
 import com.xnotes.canvas.InfiniteInteraction
 import com.xnotes.canvas.ResizeMath
 import com.xnotes.canvas.WetInkCache
+import com.xnotes.canvas.isHighlighterInk
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.history.Command
@@ -195,7 +196,8 @@ class InfiniteCanvasEditor(
             override fun onItemAdded(item: CanvasItem) = touched(item)
             override fun onItemChanged(item: CanvasItem) = touched(item)
             override fun onItemRemoved(item: CanvasItem) {
-                drawnBounds.remove(item)?.let { painter.invalidate(it) } ?: painter.invalidate(item.paintBounds())
+                val was = drawnBounds.remove(item) ?: item.paintBounds()
+                if (item.isHighlighterInk()) painter.invalidateBase() else painter.invalidate(was)
                 fullFrame = true
             }
 
@@ -214,11 +216,14 @@ class InfiniteCanvasEditor(
     }
 
     private fun touched(item: CanvasItem) {
-        drawnBounds[item]?.let { painter.invalidate(it) }
+        val was = drawnBounds[item]
         val now = item.paintBounds()
         drawnBounds[item] = now
-        painter.invalidate(now)
         fullFrame = true
+        // Highlighters are not in the tiles (they are drawn over the composed base): no tile to drop.
+        if (item.isHighlighterInk()) return painter.invalidateBase()
+        was?.let { painter.invalidate(it) }
+        painter.invalidate(now)
     }
 
     // --- input ---
