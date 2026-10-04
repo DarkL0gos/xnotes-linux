@@ -512,6 +512,24 @@ fun xnEditorScrollBy(editor: COpaquePointer?, dx: Double, dy: Double) = guard(Un
     e.viewChanged()
 }
 
+@CName("xn_editor_scroll_info")
+fun xnEditorScrollInfo(editor: COpaquePointer?, out: CPointer<DoubleVar>?) = guard(Unit) {
+    val st = editor!!.editor().state
+    out!![0] = st.scrollX
+    out[1] = st.scrollY
+    out[2] = st.maxScrollX()
+    out[3] = st.maxScrollY()
+    out[4] = st.viewportW.toDouble()
+    out[5] = st.viewportH.toDouble()
+}
+
+@CName("xn_editor_scroll_to")
+fun xnEditorScrollTo(editor: COpaquePointer?, x: Double, y: Double) = guard(Unit) {
+    val e = editor!!.editor()
+    e.state.scrollBy(x - e.state.scrollX, y - e.state.scrollY)
+    e.viewChanged()
+}
+
 @CName("xn_editor_fit_width")
 fun xnEditorFitWidth(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().editor.fitWidth() }
 

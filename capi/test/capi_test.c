@@ -395,6 +395,18 @@ int main(int argc, char** argv) {
     CHECK(xn_note_item_count(note, page) == 1, "undo removes the box");
     xn_editor_set_tool(ed, "pen");
 
+    /* v2: scroll bars. */
+    double sc[6];
+    xn_editor_scroll_info(ed, sc);
+    CHECK(sc[3] > 0 && sc[4] == 800 && sc[5] == 1000, "scroll range %g, viewport %gx%g", sc[3], sc[4], sc[5]);
+    xn_editor_scroll_to(ed, 0, sc[3] / 2);
+    xn_editor_scroll_info(ed, sc);
+    CHECK(sc[1] > 0 && sc[1] <= sc[3], "scrolled to %g of %g", sc[1], sc[3]);
+    xn_editor_scroll_to(ed, 0, 1e9);
+    xn_editor_scroll_info(ed, sc);
+    CHECK(sc[1] == sc[3], "scrolling is clamped");
+    xn_editor_scroll_to(ed, 0, 0);
+
     /* v2: images. */
     CHECK(xn_editor_insert_image(ed, "/nonexistent/file.txt", 0, 0, 0) == 0, "an unreadable image is refused");
     CHECK(xn_editor_insert_image(ed, "/tmp/picture.png", 1, 400, 500) == 1, "insert an image");

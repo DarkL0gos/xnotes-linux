@@ -5,6 +5,9 @@
 #include "SelectionBar.h"
 #include "TextOverlay.h"
 #include "PdfExport.h"
+#include "MainWindow.h"
+
+#include <QScrollBar>
 
 #include <QPdfDocument>
 #include <QPdfWriter>
@@ -411,6 +414,28 @@ private slots:
 
         canvas.setNote(nullptr);
         xn_note_close(note);
+    }
+
+    /* The scroll bars follow the view and move it. */
+    void scrollBars() {
+        MainWindow window;
+        window.newNote();
+        window.resize(900, 700);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* canvas = window.findChild<CanvasWidget*>();
+        for (int i = 0; i < 3; i++) xn_editor_add_page(canvas->editor());
+        QScrollBar* vbar = nullptr;
+        for (QScrollBar* b : window.findChildren<QScrollBar*>())
+            if (b->orientation() == Qt::Vertical && b->parentWidget() == canvas->parentWidget()) vbar = b;
+        QVERIFY(vbar);
+        QVERIFY(vbar->maximum() > 0);
+        vbar->setValue(vbar->maximum() / 2);
+        double sc[6];
+        xn_editor_scroll_info(canvas->editor(), sc);
+        QVERIFY(qAbs(sc[1] - vbar->maximum() / 2) <= 1);
+        xn_editor_scroll_to(canvas->editor(), 0, 0);
+        QCOMPARE(vbar->value(), 0);
     }
 
     void eraserEndErases() {

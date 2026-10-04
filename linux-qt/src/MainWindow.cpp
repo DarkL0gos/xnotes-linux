@@ -8,6 +8,8 @@
 #include <QCloseEvent>
 #include <QClipboard>
 #include <QColorDialog>
+#include <QGridLayout>
+#include <QScrollBar>
 #include <QImageReader>
 #include <QMimeData>
 #include <QUuid>
@@ -80,8 +82,24 @@ QString takeError(char* error) {
 }  // namespace
 
 MainWindow::MainWindow() {
-    canvas_ = new CanvasWidget(this);
-    setCentralWidget(canvas_);
+    // The canvas with scroll bars beside and under it (device pixels, as the core counts).
+    auto* central = new QWidget(this);
+    auto* grid = new QGridLayout(central);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setSpacing(0);
+    canvas_ = new CanvasWidget(central);
+    vbar_ = new QScrollBar(Qt::Vertical, central);
+    hbar_ = new QScrollBar(Qt::Horizontal, central);
+    grid->addWidget(canvas_, 0, 0);
+    grid->addWidget(vbar_, 0, 1);
+    grid->addWidget(hbar_, 1, 0);
+    setCentralWidget(central);
+    auto scrolled = [this] {
+        if (syncingBars_ || !canvas_->editor()) return;
+        xn_editor_scroll_to(canvas_->editor(), hbar_->value(), vbar_->value());
+    };
+    connect(vbar_, &QScrollBar::valueChanged, this, scrolled);
+    connect(hbar_, &QScrollBar::valueChanged, this, scrolled);
     buildUi();
     connect(canvas_, &CanvasWidget::contentChanged, this, &MainWindow::refresh);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::refreshView);
@@ -530,7 +548,25 @@ void MainWindow::refresh() {
     refreshView();
 }
 
+void MainWindow::syncScrollBars() {
+    auto* e = canvas_->editor();
+    double sc[6] = {0, 0, 0, 0, 0, 0};
+    if (e) xn_editor_scroll_info(e, sc);
+    syncingBars_ = true;
+    vbar_->setRange(0, int(std::lround(sc[3])));
+    vbar_->setPageStep(std::max(1, int(sc[5])));
+    vbar_->setSingleStep(std::max(1, int(sc[5] / 20)));
+    vbar_->setValue(int(std::lround(sc[1])));
+    hbar_->setRange(0, int(std::lround(sc[2])));
+    hbar_->setPageStep(std::max(1, int(sc[4])));
+    hbar_->setSingleStep(std::max(1, int(sc[4] / 20)));
+    hbar_->setValue(int(std::lround(sc[0])));
+    hbar_->setVisible(sc[2] > 0);
+    syncingBars_ = false;
+}
+
 void MainWindow::refreshView() {
+    syncScrollBars();
     auto* e = canvas_->editor();
     if (!e || !note_) return;
     pageLabel_->setText(QStringLiteral("%1 / %2").arg(xn_editor_current_page(e) + 1).arg(xn_note_page_count(note_)));

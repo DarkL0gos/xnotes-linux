@@ -15,6 +15,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QSpinBox;
 class QLabel;
+class QScrollBar;
 class SelectionBar;
 
 class MainWindow : public QMainWindow {
@@ -55,12 +56,16 @@ private:
     QByteArray shapeKind_ = "rectangle";
     bool shapeFill_ = false;
     bool shapeDashed_ = false;
-    bool clipboardIsNewer_ = false;  // the system clipboard changed after the last in-app copy
+    bool clipboardIsNewer_ = false;
+    QScrollBar* vbar_;
+    QScrollBar* hbar_;
+    bool syncingBars_ = false;  // the system clipboard changed after the last in-app copy
 
     void install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path);
     void buildUi();
     void refresh();
     void refreshView();
+    void syncScrollBars();
     void chooseOpen();
     bool save(bool askPath);
     bool confirmDiscard();

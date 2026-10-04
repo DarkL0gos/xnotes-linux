@@ -373,6 +373,10 @@ void xn_editor_zoom_step(xn_editor* editor, int zoom_in);
 void xn_editor_zoom_at(xn_editor* editor, double x, double y, double factor);
 void xn_editor_scroll_by(xn_editor* editor, double dx, double dy);
 void xn_editor_fit_width(xn_editor* editor);
+/* For scroll bars, in viewport device pixels: scroll x and y, their maxima, viewport width and height. */
+void xn_editor_scroll_info(const xn_editor* editor, double* out6);
+/* Scroll to (x, y), clamped as scroll_by is. */
+void xn_editor_scroll_to(xn_editor* editor, double x, double y);
 void xn_editor_go_to_page(xn_editor* editor, int index);
 int xn_editor_current_page(const xn_editor* editor);
 double xn_editor_zoom(const xn_editor* editor);
