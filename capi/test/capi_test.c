@@ -496,6 +496,42 @@ int main(int argc, char** argv) {
     xn_editor_undo(ed);
     CHECK(xn_note_page_count(note) == 2, "undo add page");
 
+    /* The pages panel. */
+    {
+        const int64_t first = xn_note_page_id(note, 0), second = xn_note_page_id(note, 1);
+        CHECK(first != 0 && second != 0 && first != second, "pages have ids");
+        CHECK(xn_note_page_id(note, 5) == 0, "no id past the end");
+        xn_editor_insert_page_after(ed, -1);
+        CHECK(xn_note_page_count(note) == 3 && xn_editor_current_page(ed) == 0, "insert before the first");
+        CHECK(xn_note_page_id(note, 1) == first, "ids move with their pages");
+        int fresh[] = {0};
+        xn_editor_delete_pages(ed, fresh, 1);
+        CHECK(xn_note_page_count(note) == 2 && xn_note_page_id(note, 0) == first, "delete a page");
+        int all[] = {1, 0, 1};
+        xn_editor_delete_pages(ed, all, 3);
+        CHECK(xn_note_page_count(note) == 2, "the last page stays");
+        CHECK(xn_editor_can_paste_pages(ed) == 0, "nothing copied yet");
+        int one[] = {page};  /* the page with the stroke */
+        xn_editor_copy_pages(ed, one, 1);
+        CHECK(xn_editor_can_paste_pages(ed) == 1, "copied");
+        xn_editor_paste_pages_after(ed, 1);
+        CHECK(xn_note_page_count(note) == 3 && xn_editor_current_page(ed) == 2, "paste at the end");
+        const int items = xn_note_item_count(note, 2);
+        CHECK(items > 0 && items == xn_note_item_count(note, page), "the copy has the page's items");
+        CHECK(xn_note_page_id(note, 2) != xn_note_page_id(note, page), "a copy is a page of its own");
+        xn_editor_erase_page(ed, 2);
+        CHECK(xn_note_item_count(note, 2) == 0, "erase a page");
+        xn_editor_undo(ed);
+        CHECK(xn_note_item_count(note, 2) == items, "undo erase");
+        int cut[] = {2};
+        xn_editor_cut_pages(ed, cut, 1);
+        CHECK(xn_note_page_count(note) == 2, "cut a page");
+        xn_editor_undo(ed);
+        xn_editor_undo(ed);
+        CHECK(xn_note_page_count(note) == 2 && xn_note_page_id(note, 0) == first && xn_note_page_id(note, 1) == second,
+              "undo back to the two pages");
+    }
+
     /* Save, reopen. */
     char path[1024], work[1024], bad[1024];
     snprintf(path, sizeof path, "%s/capi.xnote", argv[1]);

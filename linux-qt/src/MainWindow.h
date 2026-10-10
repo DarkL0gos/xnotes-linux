@@ -18,6 +18,8 @@ class QSpinBox;
 class QLabel;
 class QScrollBar;
 class PageStylePopup;
+class PagesPanel;
+class QDockWidget;
 class SelectionBar;
 
 class MainWindow : public QMainWindow {
@@ -47,6 +49,9 @@ private:
     QAction* exportAction_;
     QAction* fitAction_;
     QList<QAction*> pageActions_;
+    PagesPanel* pages_;
+    QDockWidget* pagesDock_;
+    QAction* pagesAction_;
     QActionGroup* tools_;
     QLabel* pageLabel_;
     QLabel* zoomLabel_;
@@ -76,6 +81,8 @@ private:
     void install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path);
     void buildUi();
     void applyKind();
+    /* Paper for pages without a colour of their own: the canvas's, in the panel and in exports. */
+    xn_rgba paper() const { return dark_ ? 0x161616FFu : 0xFFFFFFFFu; }
     void refresh();
     void refreshView();
     void syncScrollBars();

@@ -23,6 +23,7 @@ import com.xnotes.core.tools.EraseMode
 import com.xnotes.core.tools.ShapeConfig
 import kotlinx.cinterop.DoubleVar
 import kotlinx.cinterop.UIntVar
+import kotlinx.cinterop.IntVar
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.history.History
 import com.xnotes.core.model.CanvasItem
@@ -981,6 +982,52 @@ fun xnEditorAddPage(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().e
 
 @CName("xn_editor_delete_current_page")
 fun xnEditorDeleteCurrentPage(editor: COpaquePointer?) = guard(Unit) { editor!!.editor().editor.deleteCurrentPage() }
+
+// --- pages panel ----------------------------------------------------------------------------------
+
+@CName("xn_note_page_id")
+fun xnNotePageId(note: COpaquePointer?, page: Int): Long = guard(0L) {
+    note!!.note().document.pages.getOrNull(page)?.uid ?: 0L
+}
+
+/** The C array as page indices (none when it is missing or empty). */
+private fun indices(pages: CPointer<IntVar>?, count: Int): List<Int> =
+    if (pages == null || count <= 0) emptyList() else List(count) { pages[it] }
+
+@CName("xn_editor_insert_page_after")
+fun xnEditorInsertPageAfter(editor: COpaquePointer?, index: Int) = guard(Unit) {
+    val e = editor!!.editor().editor
+    e.insertPageAfter(index.coerceIn(-1, e.document.pages.lastIndex))
+}
+
+@CName("xn_editor_delete_pages")
+fun xnEditorDeletePages(editor: COpaquePointer?, pages: CPointer<IntVar>?, count: Int) = guard(Unit) {
+    editor!!.editor().editor.deletePages(indices(pages, count))
+}
+
+@CName("xn_editor_erase_page")
+fun xnEditorErasePage(editor: COpaquePointer?, index: Int) = guard(Unit) { editor!!.editor().editor.erasePage(index) }
+
+@CName("xn_editor_copy_pages")
+fun xnEditorCopyPages(editor: COpaquePointer?, pages: CPointer<IntVar>?, count: Int) = guard(Unit) {
+    editor!!.editorQuiet().editor.copyPages(indices(pages, count))
+}
+
+@CName("xn_editor_cut_pages")
+fun xnEditorCutPages(editor: COpaquePointer?, pages: CPointer<IntVar>?, count: Int) = guard(Unit) {
+    editor!!.editor().editor.cutPages(indices(pages, count))
+}
+
+@CName("xn_editor_can_paste_pages")
+fun xnEditorCanPastePages(editor: COpaquePointer?): Int = guard(0) {
+    if (editor!!.editorQuiet().editor.canPastePages) 1 else 0
+}
+
+@CName("xn_editor_paste_pages_after")
+fun xnEditorPastePagesAfter(editor: COpaquePointer?, index: Int) = guard(Unit) {
+    val e = editor!!.editor().editor
+    e.pastePagesAfter(index.coerceIn(-1, e.document.pages.lastIndex))
+}
 
 // --- v2: tools, selection -----------------------------------------------------------------------
 

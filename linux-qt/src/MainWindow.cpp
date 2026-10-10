@@ -4,6 +4,7 @@
 #include "Icons.h"
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
+#include "PagesPanel.h"
 #include "PdfExport.h"
 #include "SelectionBar.h"
 
@@ -12,6 +13,7 @@
 #include <QClipboard>
 #include <QColorDialog>
 #include <QDateTime>
+#include <QDockWidget>
 #include <QGridLayout>
 #include <QInputDialog>
 #include <QPushButton>
@@ -116,7 +118,17 @@ MainWindow::MainWindow() {
     };
     connect(vbar_, &QScrollBar::valueChanged, this, scrolled);
     connect(hbar_, &QScrollBar::valueChanged, this, scrolled);
+    // Page thumbnails on the left (the Android side panel), shown with notes, not canvases.
+    pages_ = new PagesPanel(this);
+    pagesDock_ = new QDockWidget(QStringLiteral("Страницы"), this);
+    pagesDock_->setObjectName(QStringLiteral("pagesDock"));
+    pagesDock_->setFeatures(QDockWidget::NoDockWidgetFeatures);
+    pagesDock_->setTitleBarWidget(new QWidget(pagesDock_));
+    pagesDock_->setWidget(pages_);
+    addDockWidget(Qt::LeftDockWidgetArea, pagesDock_);
     buildUi();
+    connect(canvas_, &CanvasWidget::contentChanged, pages_, &PagesPanel::contentChanged);
+    connect(canvas_, &CanvasWidget::viewChanged, pages_, &PagesPanel::viewChanged);
     connect(canvas_, &CanvasWidget::contentChanged, this, &MainWindow::refresh);
     connect(canvas_, &CanvasWidget::viewChanged, this, &MainWindow::refreshView);
     connect(canvas_, &CanvasWidget::notice, this, [this](int code) {
@@ -143,6 +155,7 @@ MainWindow::MainWindow() {
 }
 
 MainWindow::~MainWindow() {
+    pages_->setDocument(nullptr, nullptr);
     canvas_->setNote(nullptr);
     if (note_) xn_note_close(note_);
 }
@@ -150,6 +163,14 @@ MainWindow::~MainWindow() {
 void MainWindow::buildUi() {
     QToolBar* bar = addToolBar(QStringLiteral("Основное"));
     bar->setMovable(false);
+    pagesAction_ = bar->addAction(xnIcon(QStringLiteral("sidebar")), QStringLiteral("Страницы"));
+    pagesAction_->setCheckable(true);
+    pagesAction_->setChecked(true);
+    pagesAction_->setShortcut(QKeySequence(Qt::Key_F9));
+    connect(pagesAction_, &QAction::toggled, this, [this](bool on) {
+        pagesDock_->setVisible(on && !(note_ && xn_note_is_canvas(note_)));
+    });
+    bar->addSeparator();
     auto* create = new QToolButton(this);
     create->setText(QStringLiteral("Создать"));
     create->setIcon(xnIcon(QStringLiteral("file")));
@@ -212,6 +233,7 @@ void MainWindow::buildUi() {
     connect(dark, &QAction::toggled, this, [this](bool on) {
         dark_ = on;
         canvas_->setDark(on);
+        pages_->setPaper(paper());
     });
 
     // Second row: tools and their style.
@@ -333,6 +355,7 @@ void MainWindow::buildUi() {
         {QStringLiteral("Фон…"), QStringLiteral("sliders")},
         {QStringLiteral("Тёмная"), QStringLiteral("view")},
         {QStringLiteral("Картинка…"), QStringLiteral("image")},
+        {QStringLiteral("Страницы"), QStringLiteral("sidebar")},
     };
     const QHash<QString, QString> tips = {
         {QStringLiteral("↶"), QStringLiteral("Отменить")}, {QStringLiteral("↷"), QStringLiteral("Повторить")},
@@ -340,6 +363,7 @@ void MainWindow::buildUi() {
         {QStringLiteral("−"), QStringLiteral("Уменьшить")}, {QStringLiteral("+"), QStringLiteral("Увеличить")},
         {QStringLiteral("+ Страница"), QStringLiteral("Добавить страницу")}, {QStringLiteral("− Страница"), QStringLiteral("Удалить страницу")},
         {QStringLiteral("Тёмная"), QStringLiteral("Тёмная бумага")},
+        {QStringLiteral("Страницы"), QStringLiteral("Панель страниц")},
     };
     for (QToolBar* tb : {bar, tools}) {
         tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
@@ -510,6 +534,7 @@ void MainWindow::showContextMenu(QPointF at, bool onLocked) {
 void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, const QString& path) {
     suggestedName_.clear();
     if (pageStyle_) pageStyle_->close();  // it edits the editor going away
+    pages_->setDocument(nullptr, nullptr);
     canvas_->setNote(nullptr);
     if (note_) xn_note_close(note_);
     note_ = note;
@@ -518,6 +543,8 @@ void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, 
     canvas_->setNote(note_);
     applyKind();
     canvas_->setDark(dark_);
+    pages_->setPaper(paper());
+    pages_->setDocument(note_, canvas_->editor());
     if (QAction* tool = tools_->checkedAction()) canvas_->setTool(tool->data().toByteArray().constData());
     if (colorAction_->data().isValid()) setInk(colorAction_->data().value<QColor>());
     applyToolSettings();
@@ -534,6 +561,8 @@ void MainWindow::newCanvas() { install(xn_canvas_new(), std::make_unique<QTempor
 void MainWindow::applyKind() {
     const bool canvas = note_ && xn_note_is_canvas(note_);
     for (QAction* a : std::as_const(pageActions_)) a->setVisible(!canvas);
+    pagesAction_->setVisible(!canvas);
+    pagesDock_->setVisible(!canvas && pagesAction_->isChecked());
     exportAction_->setEnabled(!canvas);
     fitAction_->setText(canvas ? QStringLiteral("Показать всё") : QStringLiteral("По ширине"));
     fitAction_->setToolTip(fitAction_->text());
@@ -646,7 +675,7 @@ void MainWindow::exportPdf() {
     QString out = QFileDialog::getSaveFileName(this, QStringLiteral("Экспорт в PDF"), base, QStringLiteral("PDF (*.pdf)"));
     if (out.isEmpty()) return;
     if (!out.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive)) out += QLatin1String(".pdf");
-    const QString error = writePdf(note_, out, dark_ ? 0x161616FFu : 0xFFFFFFFFu, [this](int done, int total) {
+    const QString error = writePdf(note_, out, paper(), [this](int done, int total) {
         statusBar()->showMessage(QStringLiteral("Экспорт: страница %1 из %2").arg(done).arg(total));
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     });

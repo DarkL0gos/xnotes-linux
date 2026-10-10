@@ -452,6 +452,26 @@ void xn_editor_set_page_style(xn_editor* editor, int all_pages, const xn_page_st
 void xn_editor_add_page(xn_editor* editor);
 void xn_editor_delete_current_page(xn_editor* editor);
 
+/*
+ * The pages panel. Indices are page positions now; lists of them may be in any order and repeat.
+ * Every edit is one undo step, and none leaves the note without a page (notice KEEP_ONE_PAGE).
+ */
+
+/* A page's identity, kept while it is moved around and for the note's life (0 when out of range):
+   what a host keys page thumbnails by. */
+int64_t xn_note_page_id(const xn_note* note, int page);
+/* A blank page after index (-1: before the first), sized as that page; the view goes to it. */
+void xn_editor_insert_page_after(xn_editor* editor, int index);
+void xn_editor_delete_pages(xn_editor* editor, const int* pages, int count);
+/* Remove everything on the page but keep it and its background (notice PAGE_ALREADY_EMPTY). */
+void xn_editor_erase_page(xn_editor* editor, int index);
+/* Copy pages to the editor's page clipboard; cut also deletes them. */
+void xn_editor_copy_pages(xn_editor* editor, const int* pages, int count);
+void xn_editor_cut_pages(xn_editor* editor, const int* pages, int count);
+int xn_editor_can_paste_pages(const xn_editor* editor);
+/* Fresh copies of the copied pages after index (-1: at the start); the view goes to the first. */
+void xn_editor_paste_pages_after(xn_editor* editor, int index);
+
 #ifdef __cplusplus
 }
 #endif

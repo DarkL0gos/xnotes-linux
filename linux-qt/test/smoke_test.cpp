@@ -8,10 +8,13 @@
 #include "MainWindow.h"
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
+#include "PagesPanel.h"
 #include "Icons.h"
 
 #include <QAbstractButton>
 #include <QComboBox>
+#include <QListView>
+#include <QToolButton>
 #include <QSlider>
 
 #include <QScrollBar>
@@ -994,6 +997,85 @@ private slots:
 
         canvas.setNote(nullptr);
         xn_note_close(note);
+    }
+    /* The pages panel: a thumbnail per page that follows the ink, and pages added, deleted, copied and pasted. */
+    void pagesPanel() {
+        MainWindow window;
+        window.newNote();
+        window.resize(1100, 800);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* canvas = window.findChild<CanvasWidget*>();
+        auto* panel = window.findChild<PagesPanel*>();
+        QVERIFY(panel && panel->isVisible());
+        xn_note* note = window.note();
+        QCOMPARE(panel->pageCount(), 1);
+        QTRY_COMPARE(panel->pendingThumbnails(), 0);
+        QVERIFY(panel->thumbnail(0));
+
+        // Ink on the page reaches its thumbnail once the edit settles.
+        xn_editor_set_ink_color(canvas->editor(), 0xff0000ff);
+        canvas->setTool("pen");
+        QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(250, 200));
+        for (int i = 1; i <= 30; i++) QTest::mouseMove(canvas, QPoint(250 + i * 8, 200 + i * 4));
+        QTest::mouseRelease(canvas, Qt::LeftButton, {}, QPoint(490, 320));
+        QCOMPARE(xn_note_item_count(note, 0), 1);
+        QTest::qWait(400);
+        QTRY_COMPARE(panel->pendingThumbnails(), 0);
+        // Thin at this scale, so blended with the paper: count reddish pixels.
+        auto reddish = [](const QImage* img) {
+            int n = 0;
+            for (int y = 0; y < img->height(); y++)
+                for (int x = 0; x < img->width(); x++) {
+                    const QColor c = img->pixelColor(x, y);
+                    if (c.red() > 80 && c.red() > 2 * c.green() + 30) n++;
+                }
+            return n;
+        };
+        QVERIFY2(reddish(panel->thumbnail(0)) > 20, "the stroke is in the thumbnail");
+
+        // The add button puts a page after the current one and goes to it.
+        window.findChild<QToolButton*>(QStringLiteral("addPage"))->click();
+        QCOMPARE(xn_note_page_count(note), 2);
+        QCOMPARE(panel->pageCount(), 2);
+        QCOMPARE(panel->currentPage(), 1);
+        QTRY_COMPARE(panel->pendingThumbnails(), 0);
+        QCOMPARE(reddish(panel->thumbnail(1)), 0);
+
+        // A click goes to a page.
+        QListView* list = panel->list();
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualRect(list->model()->index(0, 0)).center());
+        QCOMPARE(xn_editor_current_page(canvas->editor()), 0);
+        QCOMPARE(panel->targetPages(), QList<int>{0});
+
+        // Copy and paste with the keys while the list has the focus: the copy carries the ink.
+        list->setFocus();
+        QTest::keyClick(list, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(xn_editor_can_paste_pages(canvas->editor()), 1);
+        QCOMPARE(xn_editor_can_paste(canvas->editor()), 0);  // the items' clipboard is left alone
+        QTest::keyClick(list, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(xn_note_page_count(note), 3);
+        QCOMPARE(xn_note_item_count(note, 1), 1);
+
+        // Several pages at once, then the last one stays.
+        list->selectionModel()->select(QItemSelection(list->model()->index(1, 0), list->model()->index(2, 0)), QItemSelectionModel::ClearAndSelect);
+        QCOMPARE(panel->targetPages(), (QList<int>{1, 2}));
+        QTest::keyClick(list, Qt::Key_Delete);
+        QCOMPARE(xn_note_page_count(note), 1);
+        QCOMPARE(panel->pageCount(), 1);
+        QCOMPARE(xn_note_item_count(note, 0), 1);
+        window.findChild<QToolButton*>(QStringLiteral("deletePages"))->click();
+        QCOMPARE(xn_note_page_count(note), 1);
+        xn_editor_undo(canvas->editor());
+        QCOMPARE(panel->pageCount(), 3);
+
+        // A canvas has no pages: the panel steps aside.
+        window.newCanvas();
+        QVERIFY(!panel->isVisible());
+        QCOMPARE(panel->pageCount(), 0);
+        window.newNote();
+        QVERIFY(panel->isVisible());
+        QCOMPARE(panel->pageCount(), 1);
     }
 };
 
