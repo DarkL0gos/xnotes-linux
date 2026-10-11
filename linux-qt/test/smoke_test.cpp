@@ -9,9 +9,11 @@
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
 #include "PagesPanel.h"
+#include "PenStylePopup.h"
 #include "Icons.h"
 
 #include <QAbstractButton>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QListView>
@@ -1223,6 +1225,84 @@ private slots:
         QCOMPARE(canvas.liveSurfaces(), 0);
         xn_note_close(note);
         QCoreApplication::processEvents();
+    }
+    /* Kinds of pen on the pen button, each with its own settings; pressure can be switched off. */
+    void penKindsAndPressure() {
+        MainWindow window;
+        window.newNote();
+        window.resize(1100, 900);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* canvas = window.findChild<CanvasWidget*>();
+        xn_note* note = window.note();
+        xn_editor_set_ink_color(canvas->editor(), 0xff0000ffu);
+        xn_editor_zoom_at(canvas->editor(), 300, 300, 3.0);  // wide enough to measure
+
+        QAction* calligraphy = nullptr;
+        for (QAction* a : window.findChildren<QAction*>())
+            if (a->text() == QStringLiteral("Каллиграфическое")) calligraphy = a;
+        QVERIFY(calligraphy);
+        calligraphy->trigger();
+        QCOMPARE(QByteArray(xn_editor_tool(canvas->editor())), QByteArray("calligraphy"));
+        auto* pressure = window.findChild<QCheckBox*>();
+        QVERIFY(pressure && pressure->isVisible() && pressure->isChecked());
+
+        // A horizontal stroke whose pressure rises from light to full: its height at each end.
+        auto stroke = [&](double y) {
+            tablet(canvas, QEvent::TabletPress, {150, y}, 0.05, Qt::LeftButton, Qt::LeftButton);
+            for (int i = 1; i <= 60; i++) tablet(canvas, QEvent::TabletMove, {150.0 + i * 8, y}, 0.05 + i * 0.95 / 60, Qt::NoButton, Qt::LeftButton);
+            tablet(canvas, QEvent::TabletRelease, {630, y}, 0, Qt::LeftButton, Qt::NoButton);
+            const QImage img = grab(*canvas);
+            auto height = [&](int x) {
+                int n = 0;
+                for (int yy = int(y) - 60; yy <= int(y) + 60; yy++) n += inkPixels(img, QRect(x, yy, 1, 1));
+                return n;
+            };
+            return std::make_pair(height(200), height(580));
+        };
+        const auto [lightOn, fullOn] = stroke(250);
+        QVERIFY2(fullOn > lightOn * 1.5, qPrintable(QStringLiteral("with pressure: %1 then %2 px").arg(lightOn).arg(fullOn)));
+
+        pressure->setChecked(false);
+        xn_pen_style style;
+        for (const char* kind : {"pen", "calligraphy", "speed", "taper"}) {
+            QVERIFY(xn_editor_pen_style(canvas->editor(), kind, &style));
+            QVERIFY2(style.pressure == 0, kind);
+        }
+        const auto [lightOff, fullOff] = stroke(450);
+        QVERIFY2(qAbs(fullOff - lightOff) <= 2, qPrintable(QStringLiteral("without pressure: %1 then %2 px").arg(lightOff).arg(fullOff)));
+
+        // The settings follow a new note's editor.
+        window.newNote();
+        QVERIFY(xn_editor_pen_style(canvas->editor(), "calligraphy", &style));
+        QCOMPARE(style.pressure, 0);
+        QCOMPARE(QByteArray(xn_editor_tool(canvas->editor())), QByteArray("calligraphy"));
+        pressure->setChecked(true);
+
+        // The pen's own settings: the calligraphy nib's contrast, applied as the slider moves.
+        for (QAction* a : window.findChildren<QAction*>())
+            if (a->text() == QStringLiteral("Настройки пера…")) a->trigger();
+        auto* popup = window.findChild<PenStylePopup*>();
+        QVERIFY(popup && popup->isVisible());
+        const QList<QSlider*> sliders = popup->findChildren<QSlider*>();
+        QCOMPARE(sliders.size(), 2);  // sensitivity, contrast
+        QVERIFY(sliders[0]->isEnabled());
+        sliders[1]->setValue(sliders[1]->maximum());
+        QVERIFY(xn_editor_pen_style(canvas->editor(), "calligraphy", &style));
+        QVERIFY2(style.multiplier > 4.9, qPrintable(QString::number(style.multiplier)));
+        if (qEnvironmentVariableIsSet("XNOTES_SMOKE_SHOT")) window.grab().save(qEnvironmentVariable("XNOTES_SMOKE_SHOT"));
+        popup->close();
+
+        // Each kind draws.
+        note = window.note();
+        for (const char* kind : {"pen", "dashed", "speed", "taper", "calligraphy"}) {
+            QVERIFY(xn_editor_set_tool(canvas->editor(), kind));
+            const int before = xn_note_item_count(note, 0);
+            QTest::mousePress(canvas, Qt::LeftButton, {}, QPoint(200, 300));
+            for (int i = 1; i <= 20; i++) QTest::mouseMove(canvas, QPoint(200 + i * 10, 300 + (i % 4) * 5));
+            QTest::mouseRelease(canvas, Qt::LeftButton, {}, QPoint(400, 300));
+            QVERIFY2(xn_note_item_count(note, 0) == before + 1, kind);
+        }
     }
 };
 

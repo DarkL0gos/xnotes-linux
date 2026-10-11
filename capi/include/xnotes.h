@@ -324,6 +324,24 @@ const char* xn_editor_tool(const xn_editor* editor);
 double xn_editor_tool_width(const xn_editor* editor, const char* tool_id);
 void xn_editor_set_tool_width(xn_editor* editor, const char* tool_id, double width);
 
+/*
+ * Pens. Each stroke tool is a kind of pen: "pen" (plain), "dashed", "calligraphy" (thick and thin
+ * by direction, like a broad nib), "speed" (thins as it moves faster), "taper" (eases to a point
+ * at the end) and "highlighter". Each keeps its own style.
+ */
+typedef struct xn_pen_style {
+    int pressure;       /* the width follows the pen's pressure (pen, calligraphy, speed, taper) */
+    double sensitivity; /* 0..100: how much thinner a light touch draws, with pressure */
+    double multiplier;  /* calligraphy: thickest to thinnest, 1..5 */
+    double speed;       /* speed pen: 0..100, how much speed thins the line */
+    double tip;         /* taper pen: 0..100, the tip's width in percent of the full width */
+    double dash, gap;   /* dashed pen: dash and gap lengths, 2..40 page pixels */
+} xn_pen_style;
+/* A stroke tool's style; 0 for a tool that is not one. */
+int xn_editor_pen_style(const xn_editor* editor, const char* tool_id, xn_pen_style* out);
+/* Set it for the strokes drawn from now on (existing ones keep theirs); values are clamped. */
+void xn_editor_set_pen_style(xn_editor* editor, const char* tool_id, const xn_pen_style* style);
+
 /* The eraser removes whole strokes it touches, or only the ink under it. Its size is its radius
    in page pixels, set as its width (1..80, 24 by default). */
 enum { XN_ERASE_STROKE = 0, XN_ERASE_AREA = 1 };

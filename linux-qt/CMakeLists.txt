@@ -49,6 +49,7 @@ add_library(xnotes_host STATIC
     src/PdfPages.cpp src/PdfPages.h
     src/PageStylePopup.cpp src/PageStylePopup.h
     src/PagesPanel.cpp src/PagesPanel.h
+    src/PenStylePopup.cpp src/PenStylePopup.h
     src/Icons.cpp src/Icons.h)
 target_include_directories(xnotes_host PUBLIC src)
 

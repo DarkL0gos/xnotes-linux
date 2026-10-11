@@ -498,6 +498,35 @@ int main(int argc, char** argv) {
     xn_editor_undo(ed);
     CHECK(xn_note_page_count(note) == 2, "undo add page");
 
+    /* Pens: every kind draws, each with its own style; pressure can be ignored. */
+    {
+        xn_pen_style ps;
+        CHECK(xn_editor_pen_style(ed, "lasso", &ps) == 0, "the lasso is not a pen");
+        CHECK(xn_editor_pen_style(ed, "calligraphy", &ps) == 1 && ps.pressure == 1 && ps.multiplier > 1, "calligraphy's defaults");
+        ps.pressure = 0;
+        ps.multiplier = 4;
+        xn_editor_set_pen_style(ed, "calligraphy", &ps);
+        xn_pen_style back;
+        xn_editor_pen_style(ed, "calligraphy", &back);
+        CHECK(back.pressure == 0 && back.multiplier > 3.9 && back.multiplier < 4.1, "calligraphy's style kept");
+        xn_editor_pen_style(ed, "pen", &back);
+        CHECK(back.pressure == 1, "the plain pen keeps its own");
+        const char* kinds[] = {"pen", "dashed", "calligraphy", "speed", "taper"};
+        int before = 0;
+        for (int i = 0; i < xn_note_page_count(note); i++) before += xn_note_item_count(note, i);
+        for (int k = 0; k < 5; k++) {
+            CHECK(xn_editor_set_tool(ed, kinds[k]) == 1, "set %s", kinds[k]);
+            pen(ed, XN_ACTION_DOWN, 150, 600 + k * 30, t += 100, 0, NULL, NULL);
+            for (int step = 1; step <= 10; step++) pen(ed, XN_ACTION_MOVE, 150 + step * 15, 600 + k * 30 + (step % 3) * 4, t += 8, 0, NULL, NULL);
+            pen(ed, XN_ACTION_UP, 300, 600 + k * 30, t += 8, 0, NULL, NULL);
+        }
+        int after = 0;
+        for (int i = 0; i < xn_note_page_count(note); i++) after += xn_note_item_count(note, i);
+        CHECK(after == before + 5, "a stroke from each kind (%d)", after - before);
+        for (int k = 0; k < 5; k++) xn_editor_undo(ed);
+        xn_editor_set_tool(ed, "pen");
+    }
+
     /* The pages panel. */
     {
         const int64_t first = xn_note_page_id(note, 0), second = xn_note_page_id(note, 1);

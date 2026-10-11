@@ -12,6 +12,7 @@
 #include <memory>
 
 class CanvasWidget;
+class QCheckBox;
 class QComboBox;
 class QSlider;
 class QSpinBox;
@@ -71,6 +72,12 @@ private:
     bool syncingWidth_ = false;
     QHash<QByteArray, double> widths_;
     QByteArray shapeKind_ = "rectangle";
+    QAction* penAction_ = nullptr;   // the pen button: draws with the kind of pen picked on it
+    QHash<QByteArray, QAction*> penKinds_;
+    QCheckBox* pressure_;
+    QList<QAction*> pressureActions_;
+    QHash<QByteArray, xn_pen_style> penStyles_;  // set here, handed to every new editor
+    bool installing_ = false;  // a new editor reports the tool it starts with: the toolbar's wins
     bool shapeFill_ = false;
     bool shapeDashed_ = false;
     bool clipboardIsNewer_ = false;
@@ -94,6 +101,11 @@ private:
     QByteArray currentTool() const;
     void syncWidth();
     void applyShape();
+    void setPenKind(const QByteArray& kind);
+    xn_pen_style penStyle(const QByteArray& kind) const;
+    void setPenStyle(const QByteArray& kind, xn_pen_style style);
+    void setPressure(bool on);
+    void showPenStyle();
     void applyToolSettings();
     void pasteAt(QPointF widget);
     void selectAll();

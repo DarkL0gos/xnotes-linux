@@ -5,6 +5,7 @@
 #include "NoteFinder.h"
 #include "PageStylePopup.h"
 #include "PagesPanel.h"
+#include "PenStylePopup.h"
 #include "PdfExport.h"
 #include "SelectionBar.h"
 
@@ -21,6 +22,7 @@
 #include <QImageReader>
 #include <QMimeData>
 #include <QUuid>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QSlider>
 #include <QSpinBox>
@@ -56,6 +58,24 @@ const ToolEntry kTools[] = {
     {"text_box", "Текст", "8", "textBox"},
 };
 
+/* Kinds of pen (the Android stroke tools), drawn by the pen button. */
+const ToolEntry kPens[] = {
+    {"pen", "Перо", "", "ic_stroke_regular"},
+    {"dashed", "Пунктир", "", "ic_stroke_dashed"},
+    {"calligraphy", "Каллиграфическое", "", "ic_stroke_calligraphy"},
+    {"speed", "Скоростное", "", "ic_stroke_speed"},
+    {"taper", "Сужающееся", "", "ic_stroke_taper"},
+};
+
+const ToolEntry* penEntry(const QByteArray& kind) {
+    for (const ToolEntry& p : kPens)
+        if (kind == p.id) return &p;
+    return nullptr;
+}
+
+/* Pens whose width can follow the pressure. */
+bool hasPressure(const QByteArray& tool) { return tool == "pen" || tool == "calligraphy" || tool == "speed" || tool == "taper"; }
+
 struct FaceEntry {
     const char* id;
     const char* label;
@@ -89,7 +109,7 @@ std::pair<double, double> widthRange(const QByteArray& tool) {
 }
 
 /* Tools whose ink width (the eraser: its radius) the toolbar sets. */
-bool hasWidth(const QByteArray& tool) { return tool == "pen" || tool == "highlighter" || tool == "shape" || tool == "eraser"; }
+bool hasWidth(const QByteArray& tool) { return penEntry(tool) || tool == "highlighter" || tool == "shape" || tool == "eraser"; }
 
 QString takeError(char* error) {
     QString message = error ? QString::fromUtf8(error) : QStringLiteral("неизвестная ошибка");
@@ -249,6 +269,27 @@ void MainWindow::buildUi() {
         tools_->addAction(a);
         a->setIcon(xnIcon(QString::fromLatin1(t.icon)));
         if (qstrcmp(t.id, "pen") == 0) a->setChecked(true);
+        if (qstrcmp(t.id, "pen") == 0) {
+            // The pen button draws with the kind of pen picked on its menu.
+            penAction_ = a;
+            auto* menu = new QMenu(this);
+            auto* kinds = new QActionGroup(menu);
+            for (const ToolEntry& k : kPens) {
+                QAction* ka = menu->addAction(xnIcon(QString::fromLatin1(k.icon)), QString::fromUtf8(k.label));
+                ka->setCheckable(true);
+                ka->setChecked(qstrcmp(k.id, "pen") == 0);
+                kinds->addAction(ka);
+                penKinds_.insert(k.id, ka);
+                connect(ka, &QAction::triggered, this, [this, k] {
+                    setPenKind(k.id);
+                    penAction_->trigger();
+                });
+            }
+            menu->addSeparator();
+            menu->addAction(xnIcon(QStringLiteral("sliders")), QStringLiteral("Настройки пера…"), this, &MainWindow::showPenStyle);
+            a->setMenu(menu);
+            if (auto* button = qobject_cast<QToolButton*>(tools->widgetForAction(a))) button->setPopupMode(QToolButton::MenuButtonPopup);
+        }
         if (qstrcmp(t.id, "shape") == 0) {
             // The shape tool's button also opens what it draws.
             auto* menu = new QMenu(this);
@@ -299,6 +340,14 @@ void MainWindow::buildUi() {
         else if (auto* e = canvas_->editor()) xn_editor_set_tool_width(e, tool.constData(), w);
     });
     widthActions_ << tools->addWidget(width_) << tools->addWidget(widthValue_);
+
+    // Pressure: off, a line keeps its width however hard the pen presses (every pen at once).
+    pressure_ = new QCheckBox(QStringLiteral("Нажим"), this);
+    pressure_->setChecked(true);
+    pressure_->setFocusPolicy(Qt::ClickFocus);
+    pressure_->setToolTip(QStringLiteral("Толщина линии следует за силой нажатия пера. Выключите, чтобы линия была ровной"));
+    connect(pressure_, &QCheckBox::toggled, this, &MainWindow::setPressure);
+    pressureActions_ << tools->addWidget(pressure_);
 
     // The eraser: whole strokes or just the ink under it.
     eraseMode_ = new QComboBox(this);
@@ -382,6 +431,8 @@ void MainWindow::buildUi() {
     connect(canvas_, &CanvasWidget::contentChanged, selectionBar_, &SelectionBar::refresh);
     connect(canvas_, &CanvasWidget::contextMenu, this, &MainWindow::showContextMenu);
     connect(canvas_, &CanvasWidget::toolChanged, this, [this](const QString& id) {
+        if (installing_) return;
+        if (penEntry(id.toUtf8())) setPenKind(id.toUtf8());
         for (QAction* a : tools_->actions())
             if (a->data().toByteArray() == id.toUtf8()) a->setChecked(true);
         syncWidth();
@@ -421,6 +472,7 @@ void MainWindow::syncWidth() {
     for (QAction* a : std::as_const(widthActions_)) a->setVisible(tool != "text_box");
     for (QAction* a : std::as_const(textActions_)) a->setVisible(tool == "text_box");
     for (QAction* a : std::as_const(eraserActions_)) a->setVisible(tool == "eraser");
+    for (QAction* a : std::as_const(pressureActions_)) a->setVisible(hasPressure(tool));
     width_->setEnabled(hasWidth(tool));
     widthLabel_->setText(tool == "eraser" ? QStringLiteral(" Размер ") : QStringLiteral(" Толщина "));
     if (!hasWidth(tool)) return;
@@ -441,6 +493,50 @@ void MainWindow::applyShape() {
     xn_editor_set_shape_style(e, &style);
 }
 
+/* The pen button draws with kind from now on; its icon and tip say which. */
+void MainWindow::setPenKind(const QByteArray& kind) {
+    const ToolEntry* entry = penEntry(kind);
+    if (!entry || !penAction_) return;
+    penAction_->setData(kind);
+    penAction_->setIcon(xnIcon(QString::fromLatin1(entry->icon)));
+    penAction_->setText(QString::fromUtf8(entry->label));
+    penAction_->setToolTip(QStringLiteral("%1 (%2)").arg(QString::fromUtf8(entry->label), penAction_->shortcut().toString(QKeySequence::NativeText)));
+    if (QAction* k = penKinds_.value(kind)) k->setChecked(true);
+}
+
+xn_pen_style MainWindow::penStyle(const QByteArray& kind) const {
+    if (auto it = penStyles_.constFind(kind); it != penStyles_.constEnd()) return *it;
+    xn_pen_style s{1, 65, 2, 74, 30, 10, 8};  // the core's defaults, should there be no editor
+    if (auto* e = canvas_->editor()) xn_editor_pen_style(e, kind.constData(), &s);
+    return s;
+}
+
+void MainWindow::setPenStyle(const QByteArray& kind, xn_pen_style style) {
+    if (hasPressure(kind)) style.pressure = pressure_->isChecked() ? 1 : 0;
+    penStyles_.insert(kind, style);
+    if (auto* e = canvas_->editor()) xn_editor_set_pen_style(e, kind.constData(), &style);
+}
+
+void MainWindow::setPressure(bool) {
+    for (const ToolEntry& p : kPens)
+        if (hasPressure(p.id)) setPenStyle(p.id, penStyle(p.id));
+}
+
+/* The current pen's own settings, under the pen button. */
+void MainWindow::showPenStyle() {
+    const QByteArray kind = penAction_->data().toByteArray();
+    xn_pen_style style = penStyle(kind);
+    if (hasPressure(kind)) style.pressure = pressure_->isChecked() ? 1 : 0;
+    auto* popup = new PenStylePopup(kind, style, [this, kind](const xn_pen_style& s) { setPenStyle(kind, s); }, this);
+    popup->setAttribute(Qt::WA_DeleteOnClose);
+    QWidget* anchor = nullptr;
+    for (QToolBar* tb : findChildren<QToolBar*>())
+        if (QWidget* w = tb->widgetForAction(penAction_)) anchor = w;
+    popup->adjustSize();
+    popup->move(anchor ? anchor->mapToGlobal(QPoint(0, anchor->height())) : QCursor::pos());
+    popup->show();
+}
+
 /* Settings the toolbar holds, handed to a fresh editor. */
 void MainWindow::applyToolSettings() {
     auto* e = canvas_->editor();
@@ -448,6 +544,7 @@ void MainWindow::applyToolSettings() {
     for (auto it = widths_.cbegin(); it != widths_.cend(); ++it)
         if (it.key() != "shape") xn_editor_set_tool_width(e, it.key().constData(), it.value());
     applyShape();
+    for (auto it = penStyles_.cbegin(); it != penStyles_.cend(); ++it) xn_editor_set_pen_style(e, it.key().constData(), &it.value());
     xn_editor_set_erase_mode(e, eraseMode_->currentData().toInt());
     xn_editor_set_text_face(e, face_->currentData().toByteArray().constData());
     xn_editor_set_text_size(e, textSize_->value());
@@ -540,7 +637,9 @@ void MainWindow::install(xn_note* note, std::unique_ptr<QTemporaryDir> workDir, 
     note_ = note;
     workDir_ = std::move(workDir);
     path_ = path;
+    installing_ = true;
     canvas_->setNote(note_);
+    installing_ = false;
     applyKind();
     canvas_->setDark(dark_);
     pages_->setPaper(paper());

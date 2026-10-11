@@ -12,6 +12,9 @@ import com.xnotes.capi.c.xn_pointer
 import com.xnotes.capi.c.xn_pointer_event
 import com.xnotes.capi.c.xn_page_style
 import com.xnotes.capi.c.xn_shape_style
+import com.xnotes.capi.c.xn_pen_style
+import com.xnotes.core.tools.ToolConversions
+import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.model.PagePattern
 import com.xnotes.core.model.PageStyle
 import com.xnotes.capi.c.xn_text_field
@@ -1087,6 +1090,47 @@ fun xnEditorToolWidth(editor: COpaquePointer?, toolId: String?): Double = guard(
    
     val tool = Tool.fromId(toolId) ?: return@guard 0.0
     editor!!.editorQuiet().controller.configFor(tool).baseWidth
+}
+
+/** A stroke tool's config in either kind of editor. */
+private fun toolConfigOf(editor: COpaquePointer, tool: Tool): ToolConfig =
+    editor.canvas(quiet = true)?.editor?.toolConfig(tool) ?: editor.editorQuiet().controller.configFor(tool)
+
+private fun setToolConfigOf(editor: COpaquePointer, tool: Tool, config: ToolConfig) {
+    val c = editor.canvas()
+    if (c != null) c.editor.setToolConfig(tool, config) else editor.editor().controller.setToolConfig(tool, config)
+}
+
+@CName("xn_editor_pen_style")
+fun xnEditorPenStyle(editor: COpaquePointer?, toolId: String?, out: CPointer<xn_pen_style>?): Int = guard(0) {
+    val tool = Tool.fromId(toolId)?.takeIf { it.isStroke } ?: return@guard 0
+    val c = toolConfigOf(editor!!, tool)
+    val o = out!!.pointed
+    o.pressure = if (c.pressureEnabled) 1 else 0
+    o.sensitivity = ToolConversions.minFactorToSensitivity(c.pressureMinFactor)
+    o.multiplier = ToolConversions.directionStrengthToMultiplier(c.directionStrength)
+    o.speed = ToolConversions.strengthToSpeed(c.speedStrength)
+    o.tip = c.taperMinFactor * 100.0
+    o.dash = c.dashLength
+    o.gap = c.dashGap
+    1
+}
+
+@CName("xn_editor_set_pen_style")
+fun xnEditorSetPenStyle(editor: COpaquePointer?, toolId: String?, style: CPointer<xn_pen_style>?) = guard(Unit) {
+    val tool = Tool.fromId(toolId)?.takeIf { it.isStroke } ?: return@guard
+    val s = style!!.pointed
+    val c = toolConfigOf(editor!!, tool)
+    // As the Android pen popup: each pen keeps only its own signature control.
+    setToolConfigOf(editor, tool, c.copy(
+        pressureEnabled = s.pressure != 0,
+        pressureMinFactor = ToolConversions.sensitivityToMinFactor(s.sensitivity),
+        directionStrength = if (tool == Tool.CALLIGRAPHY) ToolConversions.multiplierToDirectionStrength(s.multiplier.coerceIn(1.0, 5.0)) else c.directionStrength,
+        speedStrength = if (tool == Tool.SPEED) ToolConversions.speedToStrength(s.speed) else c.speedStrength,
+        taperMinFactor = if (tool == Tool.TAPER) s.tip.coerceIn(0.0, 100.0) / 100.0 else c.taperMinFactor,
+        dashLength = if (tool == Tool.DASHED) s.dash.coerceIn(2.0, 40.0) else c.dashLength,
+        dashGap = if (tool == Tool.DASHED) s.gap.coerceIn(2.0, 40.0) else c.dashGap,
+    ))
 }
 
 @CName("xn_editor_set_tool_width")
