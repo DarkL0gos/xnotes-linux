@@ -2,6 +2,7 @@
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QIcon>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 
@@ -13,6 +14,9 @@ int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("xnotes"));
+    // The icon desktop/install-desktop.sh installs: Wayland takes it from the .desktop entry, X11 from the window.
+    QGuiApplication::setDesktopFileName(QStringLiteral("xnotes-qt"));
+    QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("xnotes")));
 
     if (xn_api_version() != XN_API_VERSION) {
         std::fprintf(stderr, "libxnotes API %d, expected %d\n", xn_api_version(), XN_API_VERSION);
