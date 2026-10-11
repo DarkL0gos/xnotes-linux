@@ -5,6 +5,7 @@
 #include <QFontMetricsF>
 #include <QPdfDocument>
 #include <QImageReader>
+#include <QMutex>
 #include <QPainterPath>
 #include <QTextLayout>
 #include <QTimer>
@@ -308,10 +309,15 @@ void rDrawSurface(void* r, void* surface, const double* dest, const double* src,
     p->restore();
 }
 
-/* Decoded images at the size they were last drawn, so a frame does not decode again. */
+/* Decoded images at the size they were last drawn, so a frame does not decode again. Shared by
+   the UI thread and the core's cache threads, under imageCacheLock(). */
 QCache<QString, QImage>& imageCache() {
     static QCache<QString, QImage> cache(64 * 1024 * 1024);  // bytes, via the cost below
     return cache;
+}
+QMutex& imageCacheLock() {
+    static QMutex lock;
+    return lock;
 }
 
 void rDrawImage(void* r, const char* path, double x, double y, double w, double h, int orientation, double angle) {
@@ -321,22 +327,26 @@ void rDrawImage(void* r, const char* path, double x, double y, double w, double 
     const double scale = std::max(1.0, std::hypot(p->transform().m11(), p->transform().m12()));
     const QSize want(std::ceil((turned ? h : w) * scale), std::ceil((turned ? w : h) * scale));
     const QString key = QString::fromUtf8(path) + QStringLiteral("@%1x%2").arg(want.width()).arg(want.height());
-    QImage* img = imageCache().object(key);
-    if (!img) {
+    QImage image;  // a shared copy: the cache may drop its own while another thread draws
+    {
+        QMutexLocker lock(&imageCacheLock());
+        if (QImage* cached = imageCache().object(key)) image = *cached;
+    }
+    if (image.isNull()) {
         QImageReader reader(QString::fromUtf8(path));
         reader.setAutoTransform(false);
         if (reader.size().isValid()) reader.setScaledSize(reader.size().scaled(want, Qt::KeepAspectRatioByExpanding).boundedTo(reader.size()));
-        QImage decoded = reader.read();
-        if (decoded.isNull()) return;
-        img = new QImage(std::move(decoded));
-        imageCache().insert(key, img, int(std::min<qsizetype>(img->sizeInBytes(), 64 * 1024 * 1024)));
+        image = reader.read();
+        if (image.isNull()) return;
+        QMutexLocker lock(&imageCacheLock());
+        imageCache().insert(key, new QImage(image), int(std::min<qsizetype>(image.sizeInBytes(), 64 * 1024 * 1024)));
     }
     p->save();
     p->setRenderHint(QPainter::SmoothPixmapTransform, true);
     p->translate(dest.center());
     p->rotate(orientation + angle * 180.0 / M_PI);
     const double iw = turned ? h : w, ih = turned ? w : h;
-    p->drawImage(QRectF(-iw / 2, -ih / 2, iw, ih), *img);
+    p->drawImage(QRectF(-iw / 2, -ih / 2, iw, ih), image);
     p->restore();
 }
 
@@ -397,8 +407,8 @@ QFont CoreHost::fontForFace(const QString& face, double pixelSize, bool bold, bo
 
 // --- host services ---------------------------------------------------------------------------
 
-CoreHost::CoreHost(bool backgroundPdf)
-    : pages_(backgroundPdf ? std::make_unique<PdfPages>([this] { if (onPdfReady) onPdfReady(); }) : std::make_unique<PdfPages>()) {
+CoreHost::CoreHost(bool background)
+    : pages_(background ? std::make_unique<PdfPages>([this] { if (onPdfReady) onPdfReady(); }) : std::make_unique<PdfPages>()) {
     host_.ctx = this;
     host_.renderer = &kVtable;
     host_.surface_create = surfaceCreate;
@@ -423,6 +433,7 @@ CoreHost::CoreHost(bool backgroundPdf)
     host_.pdf_page_count = pdfPageCount;
     host_.pdf_page_size = pdfPageSize;
     host_.draw_pdf_page = drawPdfPage;
+    if (background) host_.wake = wake;
 }
 
 CoreHost::~CoreHost() {
@@ -495,6 +506,8 @@ int CoreHost::imageProbe(void*, const char* path, int* w, int* h) {
     *h = size.height();
     return 1;
 }
+
+void CoreHost::wake(void* ctx) { if (H(ctx)->onWake) H(ctx)->onWake(); }
 
 void CoreHost::requestRender(void* ctx) { if (H(ctx)->onRender) H(ctx)->onRender(); }
 void CoreHost::contentChanged(void* ctx) { if (H(ctx)->onContentChanged) H(ctx)->onContentChanged(); }

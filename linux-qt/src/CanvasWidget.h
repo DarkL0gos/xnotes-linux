@@ -59,6 +59,8 @@ public:
     /* Statistics for the smoke test and the status bar. */
     int liveSurfaces() const { return core_.liveSurfaces(); }
     int pendingPdf() const { return core_.pendingPdf(); }
+    /* Page caches the core's threads are still drawing or have not handed over yet. */
+    int pendingPages() const { return editor_ ? xn_editor_background_pending(editor_) : 0; }
     double lastFrameMs() const { return lastFrameMs_; }
     /* What drew last: "перо", "ластик", "мышь" or "касание", and the pen's pressure. */
     QString lastInput() const { return lastInput_; }

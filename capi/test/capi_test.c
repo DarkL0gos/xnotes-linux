@@ -235,6 +235,7 @@ static xn_host make_host(host_state* hs) {
         h_post, h_cancel, h_frame,
         h_selection_menu, h_context_menu, h_tool_changed, h_text_edit,
         p_count, p_size, p_draw,
+        NULL, /* wake: page caches are drawn as they are asked for */
     };
     return h;
 }
@@ -272,6 +273,7 @@ int main(int argc, char** argv) {
 
     xn_editor_paint(ed, &hs.screen_target);
     CHECK(hs.screen.fills > 0, "paper was filled");
+    CHECK(xn_editor_background_pending(ed) == 0, "no background work without wake");
     CHECK(hs.screen.saves == hs.screen.restores, "balanced save/restore (%d/%d)", hs.screen.saves, hs.screen.restores);
 
     /* A pen stroke across the first page, with coalesced samples on every move. */

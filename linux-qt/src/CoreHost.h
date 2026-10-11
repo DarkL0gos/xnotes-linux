@@ -11,6 +11,8 @@
 #include <QPainter>
 #include <QString>
 
+#include <atomic>
+
 #include <functional>
 #include <memory>
 #include <vector>
@@ -73,9 +75,10 @@ struct Surface {
  */
 class CoreHost {
 public:
-    /* backgroundPdf: render PDF pages on a worker and call onPdfReady when sharper ones land
-       (the canvas); otherwise every PDF render is synchronous (export). */
-    explicit CoreHost(bool backgroundPdf = false);
+    /* background: the canvas's host. The core draws page caches on its own threads and calls
+       onWake when they are done (see xn_host.wake), and PDF pages render on a worker, calling
+       onPdfReady when sharper ones land. Otherwise everything is synchronous (export, thumbnails). */
+    explicit CoreHost(bool background = false);
     ~CoreHost();
 
     const xn_host* host() const { return &host_; }
@@ -92,6 +95,9 @@ public:
     std::function<void(QString)> onToolChanged;
     std::function<void(const xn_text_field*)> onTextEdit;
     std::function<void()> onPdfReady;
+    /* From a core thread: finished work waits for xn_editor_take_results on the UI thread. Set
+       before the editor is created; it must only queue. */
+    std::function<void()> onWake;
 
     /* PDF renders still running in the background. */
     int pendingPdf() const;
@@ -108,7 +114,7 @@ public:
 
 private:
     xn_host host_{};
-    int liveSurfaces_ = 0;
+    std::atomic<int> liveSurfaces_{0};  // surfaces are made on the core's threads too
     QHash<uint64_t, QTimer*> timers_;
     /* Open PDFs by path, loaded on first use and kept while the host lives. */
     QHash<QString, QPdfDocument*> pdfs_;
@@ -137,6 +143,7 @@ private:
     static void textEdit(void* ctx, const xn_text_field* field);
     static int pdfPageCount(void* ctx, const char* path);
     static int pdfPageSize(void* ctx, const char* path, int page, double* w, double* h);
+    static void wake(void* ctx);
     static int drawPdfPage(void* ctx, void* renderer, const char* path, int page, int fullW, int fullH, int rx, int ry,
                             int rw, int rh, double x, double y, double w, double h);
 

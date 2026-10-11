@@ -17,6 +17,8 @@ import com.xnotes.core.model.PageStyle
 import com.xnotes.capi.c.xn_text_field
 import com.xnotes.canvas.EditingField
 import com.xnotes.core.pal.FontFace
+import com.xnotes.core.platform.Lock
+import com.xnotes.core.platform.withLock
 import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.memScoped
 import com.xnotes.core.tools.EraseMode
@@ -183,7 +185,7 @@ private fun COpaquePointer.canvas(quiet: Boolean = false): CCanvasEditor? =
     (asStableRef<Any>().get() as? CCanvasEditor)?.also { if (!quiet) it.editor.fullFrame = true }
 
 @CName("xn_api_version")
-fun xnApiVersion(): Int = 2
+fun xnApiVersion(): Int = 3
 
 @CName("xn_free_string")
 fun xnFreeString(s: CPointer<ByteVar>?) = free(s)
@@ -406,8 +408,22 @@ internal class CEditor(note: CNote, private val host: xn_host) {
         }
     }
 
-    /** Pages whose background got a stand-in PDF render, redrawn once the host has the exact one. */
-    val standIns = LinkedHashSet<Page>()
+    /** Pages whose background got a stand-in PDF render, redrawn once the host has the exact one.
+     *  Backgrounds are built on the cache threads too, hence the lock. */
+    private val standIns = LinkedHashSet<Page>()
+    private val standInLock = Lock()
+
+    fun takeStandIns(): List<Page> = withLock(standInLock) { standIns.toList().also { standIns.clear() } }
+
+    /** Page caches built off the UI thread, when the host can be woken (else built as drawn). */
+    private val background: CBackground? = if (host.wake != null) CBackground(host) else null
+
+    /** Builds running or waiting, and their results not taken in yet. */
+    val backgroundPending: Int get() = background?.pending ?: 0
+
+    fun takeBackgroundResults() {
+        background?.takeResults()
+    }
 
     /** The locked item the last context menu was opened on. */
     var pressedLocked: CanvasItem? = null
@@ -428,8 +444,13 @@ internal class CEditor(note: CNote, private val host: xn_host) {
 
     init {
         state.paintPageBackground = { page, renderer, res, region ->
-            if (!paintPdfBackground(host, state.document, page, renderer, res, region)) standIns.add(page)
+            if (!paintPdfBackground(host, state.document, page, renderer, res, region)) withLock(standInLock) { standIns.add(page) }
             state.paintRuling(page, renderer, region)
+        }
+        background?.let { bg ->
+            state.runAsync = { work -> bg.run(work) }
+            state.postToMain = { work -> bg.post(work) }
+            state.onCacheReady = { requestRender() }
         }
         controller.setTool(Tool.PEN)
     }
@@ -558,6 +579,7 @@ internal class CEditor(note: CNote, private val host: xn_host) {
     fun runTask(id: ULong) = scheduler.run(id)
 
     fun dispose() {
+        background?.close() // before anything the builds use goes away
         scheduler.cancelAll()
         state.invalidateAllCaches()
         surfaces.dispose()
@@ -1137,11 +1159,20 @@ fun xnEditorSetTextFace(editor: COpaquePointer?, face: String?) = guard(Unit) {
 @CName("xn_editor_set_text_size")
 fun xnEditorSetTextSize(editor: COpaquePointer?, size: Double) = guard(Unit) { editor!!.editor().controller.setTextPointSize(size) }
 
+@CName("xn_editor_take_results")
+fun xnEditorTakeResults(editor: COpaquePointer?) = guard(Unit) {
+    (editor!!.asStableRef<Any>().get() as? CEditor)?.takeBackgroundResults()
+}
+
+@CName("xn_editor_background_pending")
+fun xnEditorBackgroundPending(editor: COpaquePointer?): Int = guard(0) {
+    (editor!!.asStableRef<Any>().get() as? CEditor)?.backgroundPending ?: 0
+}
+
 @CName("xn_editor_refresh_backgrounds")
 fun xnEditorRefreshBackgrounds(editor: COpaquePointer?) = guard(Unit) {
     val e = editor!!.editor()
-    val pages = e.standIns.toList()
-    e.standIns.clear()
+    val pages = e.takeStandIns()
     // Just the background layer (and the sharp view over it); ink caches stay.
     for (page in pages) e.state.refreshBackground(page)
     e.requestRender()

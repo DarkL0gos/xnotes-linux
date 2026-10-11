@@ -1,10 +1,12 @@
 #include "PdfPages.h"
 
+#include <QCoreApplication>
 #include <QHash>
 #include <QPainter>
 #include <QPdfDocument>
 #include <QPdfDocumentRenderOptions>
 #include <QPointer>
+#include <QThread>
 #include <QThreadPool>
 
 #include <cmath>
@@ -58,7 +60,23 @@ int PdfPages::pending() const {
     return int(queued_.size());
 }
 
+namespace {
+
+/* A document of the thread's own, kept until the thread ends. */
+QPdfDocument* threadDocument(const QString& path) {
+    thread_local QHash<QString, std::shared_ptr<QPdfDocument>> docs;
+    std::shared_ptr<QPdfDocument>& doc = docs[path];
+    if (!doc) {
+        doc = std::make_shared<QPdfDocument>();
+        if (doc->load(path) != QPdfDocument::Error::None) doc.reset();
+    }
+    return doc.get();
+}
+
+}  // namespace
+
 QPdfDocument* PdfPages::document(const QString& path) {
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) return threadDocument(path);
     if (QPdfDocument* doc = documents_.value(path)) return doc;
     auto* doc = new QPdfDocument;
     if (doc->load(path) != QPdfDocument::Error::None) {
@@ -102,6 +120,7 @@ const PdfPages::Render* PdfPages::best(const QString& path, int page, QSize full
     return found;
 }
 
+/* Under rendersLock_. */
 void PdfPages::store(Render r) {
     cachedBytes_ += r.image.sizeInBytes();
     renders_.push_front(std::move(r));
@@ -120,40 +139,46 @@ bool PdfPages::draw(QPainter* p, const QString& path, int page, QSize full, QRec
         p->drawImage(target, r.image, source);
         p->restore();
     };
-    if (const Render* r = exact(path, page, full, region)) {
-        // Touch it: most recent first.
-        for (auto it = renders_.begin(); it != renders_.end(); ++it)
-            if (&*it == r) {
-                renders_.splice(renders_.begin(), renders_, it);
-                break;
+    // What to draw is chosen under the lock and drawn after it (the images are shared copies), so
+    // threads drawing different pages do not wait on each other's blits.
+    Render chosen;
+    bool sharp = true;
+    {
+        QMutexLocker lock(&rendersLock_);
+        if (const Render* r = exact(path, page, full, region)) {
+            // Touch it: most recent first.
+            for (auto it = renders_.begin(); it != renders_.end(); ++it)
+                if (&*it == r) {
+                    renders_.splice(renders_.begin(), renders_, it);
+                    break;
+                }
+            chosen = renders_.front();
+        } else {
+            QPdfDocument* doc = document(path);
+            if (!doc || page < 0 || page >= doc->pageCount()) return true;  // nothing better will come
+            if (!ready_) {  // synchronous: exactly what was asked
+                chosen = Render{path, page, full, region, render(doc, page, full, region)};
+                if (chosen.image.isNull()) return true;
+                store(chosen);
+            } else {
+                const Render* fallback = best(path, page, full, region);
+                if (!fallback) {
+                    // Never seen at any size: a quick whole-page preview now.
+                    const double s = std::min(1.0, double(kPreviewWidth) / full.width());
+                    const QSize small = (QSizeF(full) * s).toSize().expandedTo(QSize(1, 1));
+                    Render preview{path, page, small, QRect(QPoint(0, 0), small), render(doc, page, small, QRect(QPoint(0, 0), small))};
+                    if (preview.image.isNull()) return true;
+                    store(std::move(preview));
+                    fallback = &renders_.front();
+                }
+                chosen = *fallback;
+                sharp = false;
             }
-        blit(renders_.front());
-        return true;
+        }
     }
-
-    QPdfDocument* doc = document(path);
-    if (!doc || page < 0 || page >= doc->pageCount()) return true;  // nothing better will come
-    if (!ready_) {  // synchronous: exactly what was asked
-        Render r{path, page, full, region, render(doc, page, full, region)};
-        if (r.image.isNull()) return true;
-        blit(r);
-        store(std::move(r));
-        return true;
-    }
-
-    const Render* fallback = best(path, page, full, region);
-    if (!fallback) {
-        // Never seen at any size: a quick whole-page preview now.
-        const double s = std::min(1.0, double(kPreviewWidth) / full.width());
-        const QSize small = (QSizeF(full) * s).toSize().expandedTo(QSize(1, 1));
-        Render preview{path, page, small, QRect(QPoint(0, 0), small), render(doc, page, small, QRect(QPoint(0, 0), small))};
-        if (preview.image.isNull()) return true;
-        store(std::move(preview));
-        fallback = &renders_.front();
-    }
-    blit(*fallback);
-    request(path, page, full, withSlack(region, full));
-    return false;
+    blit(chosen);
+    if (!sharp) request(path, page, full, withSlack(region, full));
+    return sharp;
 }
 
 /* Render on the worker; skipped when, by the time it runs, the page is wanted at another size. */
@@ -175,13 +200,8 @@ void PdfPages::request(const QString& path, int page, QSize full, QRect region) 
             }
         }
         // The worker's own documents: QtPdf serializes PDFium, but a QPdfDocument is not shared.
-        thread_local QHash<QString, std::shared_ptr<QPdfDocument>> docs;
-        std::shared_ptr<QPdfDocument>& doc = docs[path];
-        if (!doc) {
-            doc = std::make_shared<QPdfDocument>();
-            if (doc->load(path) != QPdfDocument::Error::None) doc.reset();
-        }
-        QImage image = doc ? render(doc.get(), page, full, region) : QImage();
+        QPdfDocument* doc = threadDocument(path);
+        QImage image = doc ? render(doc, page, full, region) : QImage();
         QMetaObject::invokeMethod(receiver, [this, receiver, key, path, page, full, region, image] {
             if (!receiver) return;
             {
@@ -189,7 +209,10 @@ void PdfPages::request(const QString& path, int page, QSize full, QRect region) 
                 queued_.removeAll(key);
             }
             if (image.isNull()) return;
-            store(Render{path, page, full, region, image});
+            {
+                QMutexLocker lock(&rendersLock_);
+                store(Render{path, page, full, region, image});
+            }
             ready_();
         }, Qt::QueuedConnection);
     });

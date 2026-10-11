@@ -13,6 +13,7 @@
 
 #include <QAbstractButton>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QListView>
 #include <QToolButton>
 #include <QSlider>
@@ -144,12 +145,24 @@ class SmokeTest : public QObject {
         QApplication::sendEvent(w, &e);
     }
 
-    /* The widget's pixels once the view settled (the sharp re-render follows ~90 ms after a zoom). */
+    /*
+     * The widget's pixels once the view settled: the sharp re-render follows ~90 ms after a zoom, and
+     * pages a frame asks for are drawn on the core's threads, so frames are painted until none is
+     * still coming.
+     */
     static QImage grab(CanvasWidget& c) {
-        c.grab();
+        auto frame = [&c] {
+            if (c.render() == CanvasWidget::Render::Gl) return glFrame(c);
+            return c.grab().toImage().convertToFormat(QImage::Format_RGB32);
+        };
+        frame();
         QTest::qWait(200);
-        if (c.render() == CanvasWidget::Render::Gl) return glFrame(c);
-        return c.grab().toImage().convertToFormat(QImage::Format_RGB32);
+        for (int i = 0; i < 20 && c.pendingPages() > 0; i++) {
+            if (!QTest::qWaitFor([&c] { return c.pendingPages() == 0; }, 5000)) break;
+            frame();
+            QTest::qWait(120);
+        }
+        return frame();
     }
 
     /*
@@ -1077,6 +1090,76 @@ private slots:
         window.newNote();
         QVERIFY(panel->isVisible());
         QCOMPARE(panel->pageCount(), 1);
+    }
+    /*
+     * Pages are drawn on the core's threads: a frame never waits for one, the page shows once its
+     * cache lands, and an editor closed while pages are being drawn waits for them and frees all.
+     */
+    void pagesDrawnInBackground() {
+        // Ten pages of dense ink, so a page takes a while to draw.
+        xn_note* note = xn_note_new(10);
+        {
+            CanvasWidget writer;
+            writer.resize(800, 1000);
+            writer.show();
+            writer.setNote(note);
+            writer.setTool("pen");
+            xn_editor_set_ink_color(writer.editor(), 0xff0000ff);
+            for (int page = 0; page < 10; page++) {
+                xn_editor_go_to_page(writer.editor(), page);
+                for (int line = 0; line < 30; line++) {
+                    const int y = 120 + line * 25;
+                    QTest::mousePress(&writer, Qt::LeftButton, {}, QPoint(100, y));
+                    for (int i = 1; i <= 40; i++) QTest::mouseMove(&writer, QPoint(100 + i * 15, y + (i % 2) * 6));
+                    QTest::mouseRelease(&writer, Qt::LeftButton, {}, QPoint(700, y));
+                }
+            }
+            writer.setNote(nullptr);
+            QCOMPARE(writer.liveSurfaces(), 0);
+        }
+        QCOMPARE(xn_note_item_count(note, 9), 30);
+
+        CanvasWidget canvas;
+        canvas.resize(800, 1000);
+        canvas.show();
+        canvas.setNote(note);
+        QImage frame(canvas.size(), QImage::Format_ARGB32_Premultiplied);
+        auto paint = [&] {
+            QPainter p(&frame);
+            canvas.renderFrame(p);
+        };
+        paint();
+        QVERIFY2(canvas.pendingPages() > 0, "the first frame hands its pages to the cache threads");
+        QVERIFY2(inkPixels(frame.convertToFormat(QImage::Format_RGB32), frame.rect()) == 0, "and does not wait for them");
+        QTRY_COMPARE_WITH_TIMEOUT(canvas.pendingPages(), 0, 10000);
+        paint();
+        QVERIFY2(inkPixels(frame.convertToFormat(QImage::Format_RGB32), frame.rect()) > 1000, "the pages show once drawn");
+
+        // Scrolling on: frames come at once while the pages arriving are drawn.
+        double sc[6];
+        xn_editor_scroll_info(canvas.editor(), sc);
+        QElapsedTimer slowest;
+        qint64 worst = 0;
+        for (double y = 0; y < sc[3]; y += sc[5] / 4) {
+            xn_editor_scroll_to(canvas.editor(), 0, y);
+            slowest.start();
+            paint();
+            worst = std::max(worst, slowest.elapsed());
+            QCoreApplication::processEvents();
+        }
+        QVERIFY2(worst < 100, qPrintable(QStringLiteral("slowest frame %1 ms").arg(worst)));
+
+        // Closed with pages still being drawn.
+        xn_editor_go_to_page(canvas.editor(), 0);
+        xn_editor_zoom_at(canvas.editor(), 400, 500, 1.7);
+        paint();
+        canvas.setNote(nullptr);
+        QCOMPARE(canvas.liveSurfaces(), 0);
+        canvas.setNote(note);
+        QCOMPARE(canvas.pendingPages(), 0);
+        canvas.setNote(nullptr);
+        xn_note_close(note);
+        QCoreApplication::processEvents();  // a wake queued by the closed editor finds nothing
     }
 };
 

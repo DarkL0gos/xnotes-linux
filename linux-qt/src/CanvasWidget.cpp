@@ -93,6 +93,10 @@ CanvasWidget::CanvasWidget(QWidget* parent) : QWidget(parent) {
     textOverlay_ = new TextOverlay(this);
     core_.onTextEdit = [this](const xn_text_field* field) { textOverlay_->onTextEdit(field); };
     core_.onPdfReady = [this] { if (editor_) xn_editor_refresh_backgrounds(editor_); };
+    // From a cache thread: take the finished pages in on this one.
+    core_.onWake = [this] {
+        QMetaObject::invokeMethod(this, [this] { if (editor_) xn_editor_take_results(editor_); }, Qt::QueuedConnection);
+    };
     core_.onNotice = [this](int code) { emit notice(code); };
     core_.onSelectionMenu = [this](bool shown, QRectF r) {
         emit selectionMenu(shown, QRectF(r.topLeft() / dpr_, r.size() / dpr_));

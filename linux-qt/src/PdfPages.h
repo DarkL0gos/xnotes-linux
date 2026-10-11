@@ -32,7 +32,8 @@ public:
     /*
      * Draw region (rx, ry, rw, rh) of page rendered at full size into target (logical rect, the
      * painter's current transform). Sharp when rendered before; else as well as possible now, and
-     * sharp once ready() has run. Returns false when it drew a stand-in.
+     * sharp once ready() has run. Returns false when it drew a stand-in. Any thread (the core
+     * draws page backgrounds on its own).
      */
     bool draw(QPainter* p, const QString& path, int page, QSize full, QRect region, const QRectF& target);
 
@@ -49,6 +50,8 @@ private:
     };
 
     std::function<void()> ready_;
+    /* Guards the renders and the documents: draw runs on the core's threads as well. */
+    mutable QMutex rendersLock_;
     std::list<Render> renders_;  // most recent first
     qint64 cachedBytes_ = 0;
     std::unique_ptr<QThreadPool> pool_;
@@ -60,8 +63,9 @@ private:
     QHash<QString, QSize> wanted_;
 
     static QImage render(QPdfDocument* doc, int page, QSize full, QRect region);
+    /* The calling thread's own copy of the document: a QPdfDocument is not shared between threads. */
     QPdfDocument* document(const QString& path);
-    QHash<QString, QPdfDocument*> documents_;
+    QHash<QString, QPdfDocument*> documents_;  // the UI thread's
 
     const Render* exact(const QString& path, int page, QSize full, QRect region) const;
     const Render* best(const QString& path, int page, QSize full, QRect region) const;

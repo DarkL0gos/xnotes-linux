@@ -1,5 +1,5 @@
 /*
- * xnotes core — C API (v2).
+ * xnotes core — C API (v3).
  *
  * The Kotlin/Native build of the xnotes core (libxnotes.so) behind a small C interface for native
  * hosts such as the Qt application. The core keeps the document model, file formats, the paged
@@ -9,7 +9,8 @@
  *
  * Conventions
  *  - Every call is made on the host's UI thread. The core calls back on that thread, from inside the
- *    API call that caused it (v1 builds page caches synchronously).
+ *    API call that caused it — except with xn_host.wake set (v3), where page caches are drawn on
+ *    threads of the core's own; see there.
  *  - Colours are 0xRRGGBBAA. Text is UTF-16 (the core's and QString's unit), with explicit lengths.
  *  - Coordinates handed to the renderer are in the renderer's current transform; the core sets up
  *    zoom and scroll itself with translate/scale.
@@ -25,7 +26,7 @@
 extern "C" {
 #endif
 
-#define XN_API_VERSION 2
+#define XN_API_VERSION 3
 
 typedef uint32_t xn_rgba; /* 0xRRGGBBAA */
 
@@ -167,6 +168,22 @@ typedef struct xn_host {
      */
     int (*draw_pdf_page)(void* ctx, void* renderer, const char* path, int page, int full_w, int full_h,
                          int rx, int ry, int rw, int rh, double x, double y, double w, double h);
+
+    /* --- v3. May be NULL. --- */
+
+    /*
+     * Background drawing. With wake set, a paged editor draws its page caches (ink and
+     * backgrounds) and the sharp view on worker threads of its own, so the UI thread never waits for
+     * a page: a frame shows what is ready, and the rest appears as it lands. The host's renderer
+     * vtable, surface_create, surface_fill, surface_renderer, text_measure, text_metrics,
+     * text_advances, image_probe and draw_pdf_page may then be called from those threads,
+     * concurrently with each other and with the UI thread (each surface is used by one thread at a
+     * time), and must be thread-safe. Every other callback stays on the UI thread.
+     *
+     * wake is called from a worker thread when finished work waits for the UI thread: the host
+     * then calls xn_editor_take_results there, soon (a queued call, not from inside wake).
+     */
+    void (*wake)(void* ctx);
 } xn_host;
 
 /* --- library -------------------------------------------------------------------------------- */
@@ -243,6 +260,11 @@ int xn_editor_frame_damage(const xn_editor* editor, double* out_xywh);
 
 /* A task posted through post_delayed/post_frame is due. */
 void xn_editor_run_task(xn_editor* editor, uint64_t task);
+
+/* v3: take in the work the background threads finished (after xn_host.wake). */
+void xn_editor_take_results(xn_editor* editor);
+/* v3: background builds running or waiting, and results not taken in yet (0 without wake). */
+int xn_editor_background_pending(const xn_editor* editor);
 
 /* --- input --- */
 
