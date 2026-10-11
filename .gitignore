@@ -32,3 +32,6 @@ keystore.properties
 # --- Profiling dumps (JFR recordings, heap dumps) ---
 *.jfr
 *.hprof
+
+# --- The original Android repository (shardulvs/xnotes-android), cloned for merging ---
+upstream/
