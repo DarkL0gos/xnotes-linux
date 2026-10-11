@@ -5,6 +5,7 @@
     <comment>xnotes note</comment>
     <comment xml:lang="ru">Заметка xnotes</comment>
     <sub-class-of type="application/zip"/>
+    <icon name="application-x-xnote"/>
     <generic-icon name="x-office-document"/>
     <glob pattern="*.xnote"/>
   </mime-type>
@@ -12,6 +13,7 @@
     <comment>xnotes canvas</comment>
     <comment xml:lang="ru">Холст xnotes</comment>
     <sub-class-of type="application/zip"/>
+    <icon name="application-x-xcanvas"/>
     <generic-icon name="x-office-drawing"/>
     <glob pattern="*.xcanvas"/>
   </mime-type>

@@ -65,8 +65,9 @@ ctest --test-dir linux-qt/build          # optional: runs offscreen
 Frames are composed on the CPU by default; `--gl` composes them with OpenGL instead.
 
 To open `.xnote` and `.xcanvas` files from the file manager (otherwise it treats them as ZIP archives), register
-the file type and the application for your user. Rerun it after moving the build; `--remove`
-undoes it.
+the file types, their icons and the application for your user. Rerun it after moving the build; `--remove`
+undoes it. GNOME keeps the icons of known apps in memory, so a changed app icon may only show after logging
+out and back in.
 
 ```bash
 ./linux-qt/desktop/install-desktop.sh
@@ -82,10 +83,15 @@ undoes it.
 - [x] Page background: paper colour and ruling (lines, dots, grid) for the note or one page
 - [x] PDF import with background rendering, PDF export
 - [x] Partial repaints while writing, fast zoom on large screens
-- [x] `.xnote` file type registration
+- [x] `.xnote` and `.xcanvas` file type registration, with the app icon and icons for both file types
 - [x] Infinite canvas (`.xcanvas`): drawing, erasing, selection, shapes, images, background, tiles at the exact zoom
-- [ ] Pen type selection (calligraphy, dashed, speed, taper)
-- [ ] Shape drawing
+- [x] Pages side panel: thumbnails, adding, deleting, copying and pasting pages
+- [x] Pages and canvas tiles drawn on background threads
+- [x] Pen types (plain, dashed, calligraphy, speed, taper) with their settings, and a switch to ignore pressure
+- [x] Basic shapes: line, arrow, rectangle, ellipse, circle, triangle
+- [ ] The original app's new shapes: the shape library (flowchart, block arrows and callouts, 3D and maths),
+  editing points and knobs, labels, connectors. The core already reads, writes and edits them; the Qt app
+  needs the tools for them
 
 ## License
 
