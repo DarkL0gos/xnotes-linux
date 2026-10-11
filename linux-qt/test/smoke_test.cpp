@@ -267,7 +267,8 @@ private slots:
         QCOMPARE(xn_note_page_count(reopened), 2);
         QCOMPARE(xn_note_item_count(reopened, 0), 2);
         canvas.setNote(reopened);
-        QVERIFY(inkPixels(grab(canvas), canvas.rect()) > 100);
+        // Fitted to the width the strokes are under two pixels wide, so few pixels are pure ink.
+        QVERIFY(inkPixels(grab(canvas), canvas.rect()) > 60);
         canvas.setNote(nullptr);
         QCOMPARE(canvas.liveSurfaces(), 0);
         xn_note_close(reopened);

@@ -189,16 +189,28 @@ void rFillEllipse(void* r, double cx, double cy, double rx, double ry, xn_rgba c
 
 /*
  * The ink ribbon: every disc plus the quad bridging each consecutive pair, filled as one nonzero
- * path so the pieces merge without seams. Every piece winds the same way as Qt's ellipses, or the
- * overlaps would cancel into holes.
+ * path so the pieces merge without seams. Every piece winds the same way, or the overlaps would
+ * cancel into holes.
+ *
+ * Filling it is most of what drawing a page costs, so the path is kept lean: discs are polygons
+ * fine enough for their size on the device (Qt flattens an ellipse's curves on every fill), and a
+ * disc inside the stroke is left out where the quads on either side already cover it, which is
+ * where the stroke barely turns and its width barely changes.
  */
 void rFillDiskRibbon(void* r, const float* centers, const float* radii, int from, int count, xn_rgba c) {
     if (count <= 0) return;
+    QPainter* p = P(r);
+    const QTransform& t = p->deviceTransform();
+    const double scale = std::sqrt(std::abs(t.m11() * t.m22() - t.m12() * t.m21()));
+    const int end = from + count;
+    auto x = [&](int i) { return double(centers[2 * i]); };
+    auto y = [&](int i) { return double(centers[2 * i + 1]); };
+
     QPainterPath path;
     path.setFillRule(Qt::WindingFill);
-    const int end = from + count;
+    QPolygonF quad(4);
     for (int i = from; i + 1 < end; i++) {
-        const double x0 = centers[2 * i], y0 = centers[2 * i + 1], x1 = centers[2 * i + 2], y1 = centers[2 * i + 3];
+        const double x0 = x(i), y0 = y(i), x1 = x(i + 1), y1 = y(i + 1);
         const double len = std::hypot(x1 - x0, y1 - y0);
         if (len < 1e-9) continue;
         const double nx = -(y1 - y0) / len, ny = (x1 - x0) / len;
@@ -206,18 +218,42 @@ void rFillDiskRibbon(void* r, const float* centers, const float* radii, int from
         const QPointF a(x0 + nx * r0, y0 + ny * r0), b(x1 + nx * r1, y1 + ny * r1);
         const QPointF cc(x1 - nx * r1, y1 - ny * r1), d(x0 - nx * r0, y0 - ny * r0);
         const double cross = (b.x() - a.x()) * (cc.y() - a.y()) - (b.y() - a.y()) * (cc.x() - a.x());
-        if (cross >= 0) {
-            path.moveTo(a); path.lineTo(b); path.lineTo(cc); path.lineTo(d);
-        } else {
-            path.moveTo(d); path.lineTo(cc); path.lineTo(b); path.lineTo(a);
-        }
+        if (cross >= 0) { quad[0] = a; quad[1] = b; quad[2] = cc; quad[3] = d; }
+        else { quad[0] = d; quad[1] = cc; quad[2] = b; quad[3] = a; }
+        path.addPolygon(quad);
         path.closeSubpath();
     }
+
+    /* Whether the quads around point i leave a visible gap that only its disc fills. */
+    auto discNeeded = [&](int i) {
+        if (i == from || i == end - 1) return true;  // the round ends
+        const double ax = x(i) - x(i - 1), ay = y(i) - y(i - 1), bx = x(i + 1) - x(i), by = y(i + 1) - y(i);
+        const double la = std::hypot(ax, ay), lb = std::hypot(bx, by);
+        const double rad = radii[i];
+        // A short segment against a change of width: the quad is no longer the discs' hull.
+        if (la < 1e-9 || lb < 1e-9 || std::abs(radii[i - 1] - rad) * 4 > la || std::abs(radii[i + 1] - rad) * 4 > lb) return true;
+        // The wedge on the outside of the turn is rad * (1 - cos(turn / 2)) deep.
+        const double cosTurn = (ax * bx + ay * by) / (la * lb);
+        const double depth = rad * scale * (1 - std::sqrt(std::max(0.0, (1 + cosTurn) / 2)));
+        return depth > 0.02;
+    };
+    QPolygonF disc;
     for (int i = from; i < end; i++) {
         const double rad = radii[i];
-        if (rad > 0) path.addEllipse(QPointF(centers[2 * i], centers[2 * i + 1]), rad, rad);
+        if (rad <= 0 || !discNeeded(i)) continue;
+        // Sides enough to stay within a twentieth of a device pixel of the circle.
+        const double dev = rad * scale;
+        const int n = dev <= 0.05 ? 4 : std::clamp(int(std::ceil(M_PI / std::acos(std::max(-1.0, 1 - 0.05 / dev)))), 4, 96);
+        disc.resize(n);
+        const double cx = x(i), cy = y(i);
+        for (int k = 0; k < n; k++) {
+            const double a = 2 * M_PI * k / n;  // increasing angle winds as the quads do
+            disc[k] = QPointF(cx + rad * std::cos(a), cy + rad * std::sin(a));
+        }
+        path.addPolygon(disc);
+        path.closeSubpath();
     }
-    P(r)->fillPath(path, toColor(c));
+    p->fillPath(path, toColor(c));
 }
 
 void rStrokePolyline(void* r, const double* xy, int n, int closed, const xn_pen* pen) {
