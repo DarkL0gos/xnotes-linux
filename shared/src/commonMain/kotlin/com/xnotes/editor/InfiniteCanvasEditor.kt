@@ -102,6 +102,16 @@ class InfiniteCanvasEditor(
     var devicePxPerDp = 1.0
 
     private val painter = InfiniteFramePainter(surfaces)
+
+    /**
+     * Render the tiles a pan or a zoom uncovers on the host's cache threads: [runAsync] runs work
+     * there, [postToMain] hands results back to the UI thread.
+     */
+    fun renderTilesOffThread(runAsync: (() -> Unit) -> Unit, postToMain: (() -> Unit) -> Unit) {
+        painter.runAsync = runAsync
+        painter.postToMain = postToMain
+        painter.onTileReady = { invalidateFrame() }
+    }
     private val wetCache = WetInkCache(surfaces)
 
     // --- tools ---
@@ -622,6 +632,8 @@ class InfiniteCanvasEditor(
                 scheduler.removeCallbacks(zoomSettle)
                 scheduler.postDelayed(zoomSettle, ZOOM_SETTLE_MS)
             }
+            // Tiles are on their way; each one that lands asks for a frame.
+            InfiniteFramePainter.Result.WAITING -> Unit
             InfiniteFramePainter.Result.COMPLETE -> Unit
         }
     }

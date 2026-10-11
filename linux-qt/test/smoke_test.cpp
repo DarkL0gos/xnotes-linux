@@ -1161,6 +1161,69 @@ private slots:
         xn_note_close(note);
         QCoreApplication::processEvents();  // a wake queued by the closed editor finds nothing
     }
+    /* The same on an infinite canvas: tiles a pan or a zoom uncovers are rendered off the UI thread. */
+    void canvasTilesDrawnInBackground() {
+        xn_note* note = xn_canvas_new();
+        CanvasWidget canvas;
+        canvas.resize(1200, 900);
+        canvas.show();
+        canvas.setNote(note);
+        canvas.setDark(false);
+        canvas.setTool("pen");
+        xn_editor_set_ink_color(canvas.editor(), 0xff0000ffu);
+        for (int k = 0; k < 1500; k++) {
+            const double x0 = 20 + (k % 50) * 23, y0 = 20 + (k / 50) * 29;
+            tablet(&canvas, QEvent::TabletPress, {x0, y0}, 0.5, Qt::LeftButton, Qt::LeftButton);
+            for (int i = 1; i <= 10; i++) tablet(&canvas, QEvent::TabletMove, {x0 + i * 2, y0 + 5 * std::sin(i)}, 0.5, Qt::NoButton, Qt::LeftButton);
+            tablet(&canvas, QEvent::TabletRelease, {x0 + 20, y0}, 0, Qt::LeftButton, Qt::NoButton);
+        }
+        QImage frame(canvas.size(), QImage::Format_ARGB32_Premultiplied);
+        QElapsedTimer timer;
+        auto paint = [&] {
+            timer.start();
+            QPainter p(&frame);
+            canvas.renderFrame(p);
+            return timer.elapsed();
+        };
+        auto ink = [&] { return inkPixels(frame.convertToFormat(QImage::Format_RGB32), QRect(0, 0, 1200, 900)); };
+        paint();
+        QTRY_COMPARE_WITH_TIMEOUT(canvas.pendingPages(), 0, 10000);
+        paint();
+        const int whole = ink();
+        QVERIFY(whole > 10000);
+
+        // A pan to fresh ground: the frame does not wait for the tiles, which land soon.
+        xn_editor_scroll_by(canvas.editor(), 900, 700);
+        qint64 worst = paint();
+        QVERIFY2(canvas.pendingPages() > 0, "the uncovered tiles go to the cache threads");
+        QTRY_COMPARE_WITH_TIMEOUT(canvas.pendingPages(), 0, 10000);
+        paint();
+        xn_editor_scroll_by(canvas.editor(), -900, -700);
+        worst = std::max(worst, paint());
+        QTRY_COMPARE_WITH_TIMEOUT(canvas.pendingPages(), 0, 10000);
+        paint();
+        QVERIFY2(qAbs(ink() - whole) < whole / 50, "back where it was, the same ink");
+
+        // A zoom: tiles at the new scale, rendered once it settles, off the UI thread.
+        xn_editor_zoom_at(canvas.editor(), 600, 450, 1.6);
+        worst = std::max(worst, paint());
+        QTest::qWait(150);
+        worst = std::max(worst, paint());
+        QTRY_COMPARE_WITH_TIMEOUT(canvas.pendingPages(), 0, 10000);
+        paint();
+        QVERIFY(ink() > whole);
+        QVERIFY2(worst < 60, qPrintable(QStringLiteral("slowest frame %1 ms").arg(worst)));
+
+        // Closed with tiles still being drawn.
+        xn_editor_zoom_at(canvas.editor(), 600, 450, 1.5);
+        paint();
+        QTest::qWait(150);
+        paint();
+        canvas.setNote(nullptr);
+        QCOMPARE(canvas.liveSurfaces(), 0);
+        xn_note_close(note);
+        QCoreApplication::processEvents();
+    }
 };
 
 QTEST_MAIN(SmokeTest)

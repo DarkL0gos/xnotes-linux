@@ -172,9 +172,10 @@ typedef struct xn_host {
     /* --- v3. May be NULL. --- */
 
     /*
-     * Background drawing. With wake set, a paged editor draws its page caches (ink and
-     * backgrounds) and the sharp view on worker threads of its own, so the UI thread never waits for
-     * a page: a frame shows what is ready, and the rest appears as it lands. The host's renderer
+     * Background drawing. With wake set, an editor draws on worker threads of its own: a paged one
+     * its page caches (ink and backgrounds) and the sharp view, a canvas the tiles a pan or a zoom
+     * uncovers (and those around the view, ahead of a pan). The UI thread never waits for them: a
+     * frame shows what is ready, and the rest appears as it lands. The host's renderer
      * vtable, surface_create, surface_fill, surface_renderer, text_measure, text_metrics,
      * text_advances, image_probe and draw_pdf_page may then be called from those threads,
      * concurrently with each other and with the UI thread (each surface is used by one thread at a

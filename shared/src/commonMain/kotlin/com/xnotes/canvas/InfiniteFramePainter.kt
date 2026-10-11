@@ -13,6 +13,7 @@ import com.xnotes.core.pal.RasterSurface
 import com.xnotes.core.pal.Renderer
 import com.xnotes.core.pal.SurfaceFactory
 import com.xnotes.core.platform.monotonicNanos
+import kotlin.concurrent.Volatile
 import kotlin.math.floor
 
 /**
@@ -26,6 +27,11 @@ import kotlin.math.floor
  * A zoom invalidates every tile at once, so while it is changing nothing is rendered: the frame
  * shows the last complete view scaled (one image, not a hundred tiles), and the tiles for the new
  * zoom are rendered once it holds still, a budget per frame, over that stand-in.
+ *
+ * With [runAsync] set, the tiles a pan or a zoom uncovers are rendered on the host's cache threads
+ * instead, the stand-in showing where they are missing until [onTileReady] says one landed, and the
+ * ring of tiles around the view is rendered ahead. Tiles over an edit are still rendered within the
+ * frame, so the changed ink never blinks out (the stand-in predates it).
  *
  * The frame's base (paper, ruling, ink, highlighters) is composed into a view-sized [base] surface
  * and copied out, so the last complete one is at hand as that stand-in. Highlighters are not
@@ -44,7 +50,38 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
 
         /** The zoom is changing: tiles wait until it holds still; paint again once it has. */
         ZOOMING,
+
+        /** Tiles are missing and being rendered off the UI thread: [onTileReady] asks for the next frame. */
+        WAITING,
     }
+
+    /**
+     * Off-thread tile rendering: [runAsync] runs a render on a cache thread, which hands the tile
+     * back through [postToMain] (to the UI thread); [onTileReady] then asks for a frame. Unset,
+     * tiles are rendered within the frame, a budget at a time.
+     */
+    var runAsync: ((() -> Unit) -> Unit)? = null
+    var postToMain: ((() -> Unit) -> Unit)? = null
+    var onTileReady: (() -> Unit)? = null
+
+    /** A tile render handed to a cache thread; dropped when its result is no longer wanted. */
+    private class Request {
+        /** Set on the UI thread, read by the cache thread before it starts drawing. */
+        @Volatile
+        var cancelled = false
+    }
+
+    /** Tiles being rendered off the UI thread, each with the request its result must still match. */
+    private val pending = HashMap<Key, Request>()
+
+    /** Forget [key]'s render under way, and spare the cache thread the work if it has not begun. */
+    private fun cancel(key: Key) {
+        pending.remove(key)?.cancelled = true
+    }
+
+    /** Content changed since the view was last complete: its tiles are rendered within the frame. */
+    private val edited = ArrayList<Rect>()
+    private var editedAll = false
 
     private data class Key(val zoom: Double, val ix: Long, val iy: Long)
 
@@ -77,6 +114,9 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
     /** Drop the tiles that show any part of [content] (an item was added, removed or changed there). */
     fun invalidate(content: Rect) {
         generation++
+        // Renders under way there predate the change: their tiles are turned away when they land.
+        for (key in pending.keys.filter { rectOf(it).intersects(content) }) cancel(key)
+        edited.add(content)
         val it = tiles.entries.iterator()
         while (it.hasNext()) {
             val e = it.next()
@@ -90,6 +130,9 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
     /** Everything is stale (the order changed, a reset, a new background). */
     fun invalidateAll() {
         generation++
+        for (r in pending.values) r.cancelled = true
+        pending.clear()
+        editedAll = true
         for (t in tiles.values) t.surface.recycle()
         tiles.clear()
     }
@@ -145,17 +188,37 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
         val sameView = s != null && s.zoom == zoom && s.scrollX == viewport.scrollX && s.scrollY == viewport.scrollY &&
             s.surface.width == w && s.surface.height == h
         val deadline = if (sameView) Long.MAX_VALUE else monotonicNanos() + budgetNanos
+        val async = runAsync != null && postToMain != null
         renderedLastFrame = 0
         val ready = ArrayList<Pair<Key, Tile>>()
         val absent = ArrayList<Key>()
         for (iy in iy0..iy1) for (ix in ix0..ix1) {
             val key = Key(zoom, ix, iy)
             var tile = tiles[key]
-            if (tile == null && !zooming && (renderedLastFrame == 0 || monotonicNanos() < deadline)) {
-                tile = renderTile(key, doc, skip)
-                renderedLastFrame++
+            if (tile == null && !zooming) {
+                val overEdit = editedAll || edited.any { rectOf(key).intersects(it) }
+                if (async && !overEdit && !sameView) {
+                    requestTile(key, doc, skip)
+                } else if (overEdit || renderedLastFrame == 0 || monotonicNanos() < deadline) {
+                    cancel(key) // drawn here and now; a render under way is outdated
+                    tile = renderTile(key, doc, skip)
+                    renderedLastFrame++
+                }
             }
             if (tile == null) absent.add(key) else ready.add(key to tile.also { it.used = frameNo })
+        }
+        // Renders queued for views since left (a pan or a zoom away) would hold up this one's.
+        if (async && pending.isNotEmpty()) {
+            val stale = pending.keys.filter { it.zoom != zoom || it.ix !in ix0 - 1..ix1 + 1 || it.iy !in iy0 - 1..iy1 + 1 }
+            for (key in stale) cancel(key)
+        }
+        // Ahead of a pan: the ring around the view, once the view itself is asked for.
+        if (async && !zooming) {
+            for (iy in iy0 - 1..iy1 + 1) for (ix in ix0 - 1..ix1 + 1) {
+                if (iy in iy0..iy1 && ix in ix0..ix1) continue
+                val key = Key(zoom, ix, iy)
+                if (key !in tiles) requestTile(key, doc, skip)
+            }
         }
 
         // The last complete base, moved to this view, for what is not rendered yet.
@@ -197,6 +260,8 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
         r.drawRaster(base.surface, view)
 
         if (!missing) {
+            edited.clear()
+            editedAll = false
             // The new complete base: keep it as the stand-in, and compose the next into the old one.
             work = stable
             stable = base
@@ -206,6 +271,7 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
         return when {
             !missing -> Result.COMPLETE
             zooming -> Result.ZOOMING
+            absent.all { it in pending } -> Result.WAITING
             else -> Result.RENDERING
         }
     }
@@ -219,17 +285,46 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
     }
 
     /** Ink for [key]'s square at its zoom, on a transparent tile. */
-    private fun renderTile(key: Key, doc: InfiniteDocument, skip: (CanvasItem) -> Boolean): Tile {
+    private fun renderTile(key: Key, doc: InfiniteDocument, skip: (CanvasItem) -> Boolean): Tile =
+        Tile(drawTile(key, tileItems(key, doc, skip)), frameNo).also { tiles[key] = it }
+
+    /** What goes into [key]'s tile, read on the UI thread. */
+    private fun tileItems(key: Key, doc: InfiniteDocument, skip: (CanvasItem) -> Boolean): List<CanvasItem> =
+        doc.itemsIn(rectOf(key)).filter { !skip(it) && !it.isHighlighterInk() }
+
+    /** [items] drawn for [key], on any thread. */
+    private fun drawTile(key: Key, items: List<CanvasItem>): RasterSurface {
         val rect = rectOf(key)
         val surface = surfaces.create(TILE.toInt(), TILE.toInt(), 1.0)
         surface.fill(TRANSPARENT)
         val tr = surface.renderer()
         tr.scale(key.zoom, key.zoom)
         tr.translate(-rect.left, -rect.top)
-        for (item in doc.itemsIn(rect)) {
-            if (!skip(item) && !item.isHighlighterInk()) item.paint(tr)
+        for (item in items) item.paint(tr)
+        return surface
+    }
+
+    /** Render [key]'s tile on a cache thread, unless one is under way; it joins [tiles] when it lands. */
+    private fun requestTile(key: Key, doc: InfiniteDocument, skip: (CanvasItem) -> Boolean) {
+        if (key in pending) return
+        val async = runAsync ?: return
+        val post = postToMain ?: return
+        val request = Request()
+        pending[key] = request
+        val items = tileItems(key, doc, skip)
+        async {
+            if (request.cancelled) return@async
+            val surface = drawTile(key, items)
+            post {
+                if (pending[key] === request) {
+                    pending.remove(key)
+                    tiles.put(key, Tile(surface, frameNo))?.surface?.recycle()
+                    onTileReady?.invoke()
+                } else {
+                    surface.recycle() // the ink there changed while it was drawn
+                }
+            }
         }
-        return Tile(surface, frameNo).also { tiles[key] = it }
     }
 
     /** Over the budget, tiles of other zooms go first, then the least recently shown. */
@@ -246,6 +341,7 @@ class InfiniteFramePainter(private val surfaces: SurfaceFactory) {
     /** Let every surface go. */
     fun dispose() {
         invalidateAll()
+        onTileReady = null
         work?.surface?.recycle()
         stable?.surface?.recycle()
         work = null

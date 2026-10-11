@@ -614,6 +614,19 @@ internal class CCanvasEditor(note: CCanvasNote, private val host: xn_host) {
         }
     })
 
+    /** Tiles rendered off the UI thread, when the host can be woken (else within the frame). */
+    private val background: CBackground? = if (host.wake != null) CBackground(host) else null
+
+    init {
+        background?.let { bg -> editor.renderTilesOffThread({ bg.run(it) }, { bg.post(it) }) }
+    }
+
+    val backgroundPending: Int get() = background?.pending ?: 0
+
+    fun takeBackgroundResults() {
+        background?.takeResults()
+    }
+
     fun paint(target: COpaquePointer?) {
         surfaces.drain()
         editor.paint(CRenderer(host.renderer!!.pointed, target))
@@ -663,6 +676,7 @@ internal class CCanvasEditor(note: CCanvasNote, private val host: xn_host) {
     }
 
     fun dispose() {
+        background?.close() // before anything the renders use goes away
         scheduler.cancelAll()
         editor.dispose()
         surfaces.dispose()
@@ -1161,12 +1175,19 @@ fun xnEditorSetTextSize(editor: COpaquePointer?, size: Double) = guard(Unit) { e
 
 @CName("xn_editor_take_results")
 fun xnEditorTakeResults(editor: COpaquePointer?) = guard(Unit) {
-    (editor!!.asStableRef<Any>().get() as? CEditor)?.takeBackgroundResults()
+    when (val e = editor!!.asStableRef<Any>().get()) {
+        is CEditor -> e.takeBackgroundResults()
+        is CCanvasEditor -> e.takeBackgroundResults()
+    }
 }
 
 @CName("xn_editor_background_pending")
 fun xnEditorBackgroundPending(editor: COpaquePointer?): Int = guard(0) {
-    (editor!!.asStableRef<Any>().get() as? CEditor)?.backgroundPending ?: 0
+    when (val e = editor!!.asStableRef<Any>().get()) {
+        is CEditor -> e.backgroundPending
+        is CCanvasEditor -> e.backgroundPending
+        else -> 0
+    }
 }
 
 @CName("xn_editor_refresh_backgrounds")
