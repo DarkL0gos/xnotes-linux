@@ -48,7 +48,7 @@ internal class RestoredSession(val document: OpenDocument, val view: Map<String,
 /** Reads assets into a private working directory and writes bundles without touching source on failure. */
 internal class DesktopStorage(private val paths: DesktopPaths = DesktopPaths()) : AutoCloseable {
     private val noteCodec = DocumentCodec(DesktopImageCodec, DesktopTextMeasurer)
-    private val canvasCodec = CanvasCodec(DesktopImageCodec)
+    private val canvasCodec = CanvasCodec(DesktopImageCodec, DesktopTextMeasurer)
     private val session = SessionStore(paths.state.resolve("session"), noteCodec, canvasCodec)
     private var assets: File? = null
 

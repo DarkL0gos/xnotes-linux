@@ -7,7 +7,9 @@ import com.xnotes.core.model.Rgba
 import com.xnotes.core.model.insets
 import com.xnotes.core.model.paintPagePattern
 import com.xnotes.core.model.resolvedPageColor
-import com.xnotes.core.model.resolvedPattern
+import com.xnotes.core.model.PagePattern
+import com.xnotes.core.model.PageStyle
+import com.xnotes.core.model.resolvedTemplate
 import com.xnotes.core.model.resolvedPatternColor
 import com.xnotes.core.model.resolvedSpacing
 import com.xnotes.core.text.FlowFrame
@@ -28,8 +30,11 @@ internal object PagePainter {
             painter.clipRect(cover)
             painter.fillBackground(cover, page.resolvedPageColor(document,
                 if (darkPaper) Rgba(22, 22, 22, 255) else Rgba(255, 255, 255, 255))!!)
-            paintPagePattern(painter, page.resolvedPattern(document), page.resolvedPatternColor(document),
-                page.resolvedSpacing(document), cover, visible)
+            // The built-in templates are the classic rulings.
+            PagePattern.fromId(page.resolvedTemplate(document))?.let { pattern ->
+                paintPagePattern(painter, pattern, page.resolvedPatternColor(document),
+                    page.resolvedSpacing(document) ?: PageStyle.DEFAULT_SPACING, cover, visible)
+            }
             if (page.pdfPage != null && document.pdfFile != null) {
                 // The PDF source will be painted by the next platform layer step.
                 painter.fillRect(Rect(0.0, 0.0, page.width, 30.0), Rgba(220, 225, 235, 255))

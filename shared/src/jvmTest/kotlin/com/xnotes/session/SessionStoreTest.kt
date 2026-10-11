@@ -23,7 +23,7 @@ class SessionStoreTest {
     private val root = Files.createTempDirectory("session-test").toFile()
     private val dir = File(root, "session")
     private val work = File(root, "work").apply { mkdirs() }
-    private val store = SessionStore(dir, DocumentCodec(FakeImageCodec(), FakeTextMeasurer()), CanvasCodec(FakeImageCodec()))
+    private val store = SessionStore(dir, DocumentCodec(FakeImageCodec(), FakeTextMeasurer()), CanvasCodec(FakeImageCodec(), FakeTextMeasurer()))
 
     @After fun cleanup() {
         root.deleteRecursively()

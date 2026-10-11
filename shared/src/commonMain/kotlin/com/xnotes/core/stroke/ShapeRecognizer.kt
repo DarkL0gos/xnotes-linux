@@ -3,7 +3,11 @@ package com.xnotes.core.stroke
 import com.xnotes.core.geometry.Geometry
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.ShapeItem
+import com.xnotes.core.shapes.ShapeKind
+import com.xnotes.core.vector.VectorContour
+import com.xnotes.core.vector.VectorSeg
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.acos
@@ -19,14 +23,47 @@ import kotlin.math.sqrt
  * A geometric shape inferred from a freehand stroke (the "hold to snap" gesture).
  * [start]/[end] are opposite corners of the bounding box (or the two endpoints for
  * [ShapeKind.LINE]); [vertices] carries the corner list (content px) for the
- * [ShapeKind.POLYGON] and [ShapeKind.POLYLINE] kinds and is null for the rest.
+ * [ShapeKind.POLYGON] and [ShapeKind.POLYLINE] kinds, and [controls] the four control
+ * points of a [ShapeKind.CURVE]; both are null for the rest. A turned ellipse or capsule
+ * has its unturned box in [start]/[end] and the turn about its centre in [rotation].
  */
 data class RecognizedShape(
     val kind: ShapeKind,
     val start: Pt,
     val end: Pt,
     val vertices: List<Pt>? = null,
-)
+    val controls: List<Pt>? = null,
+    val rotation: Double = 0.0,
+) {
+    /** The shape this stands for, in the style of the stroke it replaces. */
+    fun toShape(
+        color: Rgba,
+        width: Double,
+        fill: Rgba?,
+        neon: Boolean,
+        neonStrength: Double,
+        dashed: Boolean,
+        dashLength: Double,
+        dashGap: Double,
+    ): ShapeItem {
+        val c = controls
+        val v = vertices
+        val shape = when {
+            c != null && c.size == 4 ->
+                ShapeItem.free(kind, listOf(VectorContour(c[0], listOf(VectorSeg.Cubic(c[1], c[2], c[3])), false)), color, width)
+            v != null -> ShapeItem.poly(kind, v, color, width)
+            else -> ShapeItem(kind, start, end, color, width, rotation = rotation)
+        }
+        return shape.also {
+            it.fillRgba = fill
+            it.neon = neon
+            it.neonStrength = neonStrength
+            it.dashed = dashed
+            it.dashLength = dashLength
+            it.dashGap = dashGap
+        }
+    }
+}
 
 /**
  * Classifies a freehand stroke into a clean shape, or `null` when it is not a confident
@@ -41,7 +78,9 @@ data class RecognizedShape(
  *  - open multi-segment zig-zag -> [ShapeKind.POLYLINE] (vertices preserved)
  *  - any other smooth open stroke (a C, an S, ...) -> [ShapeKind.CURVE] (a single fitted cubic
  *    Bézier, sampled to a dense polyline), or left as ink if one cubic can't follow it
- *  - closed round blob -> [ShapeKind.ELLIPSE] (snapped to a circle when nearly round)
+ *  - closed round blob -> [ShapeKind.ELLIPSE] (snapped to a circle when nearly round), turned
+ *    to lie along a clearly turned oval
+ *  - closed loop with straight sides and round ends -> [ShapeKind.CAPSULE], turned likewise
  *  - closed n-gon with sharp corners -> [ShapeKind.RECTANGLE] when it is an upright box,
  *    else [ShapeKind.POLYGON] (vertices preserved, including 3-corner triangles)
  *
@@ -140,6 +179,18 @@ object ShapeRecognizer {
     /** Points the single fitted cubic is sampled to when turned back into a polyline. */
     private const val CURVE_SAMPLES = 64
 
+    /** Shorter side / longer side above this is too round for a capsule; it is an oval or a circle. */
+    private const val CAPSULE_MAX_ASPECT = 0.75
+
+    /** RMS distance from the stroke to its capsule, over the capsule's half-thickness, at or under this fits. */
+    private const val CAPSULE_FIT = 0.15
+
+    /** Across the diagonal of each end, a capsule must follow the stroke this much more closely than a box. */
+    private const val CAPSULE_OVER_BOX = 0.45
+
+    /** Fewer samples than this across the ends' diagonals can't tell a round end from a square one. */
+    private const val CAPSULE_MIN_END_POINTS = 4
+
     /** Recognize from raw stroke samples (the page-local positions are what matter). */
     fun recognize(samples: List<Sample>): RecognizedShape? = recognizePoints(samples.map { it.pos })
 
@@ -203,24 +254,28 @@ object ShapeRecognizer {
     }
 
     private fun curveFrom(path: List<Pt>, diag: Double): RecognizedShape? {
-        val curve = CubicFit.fitSampled(path, CURVE_FIT_TOL_FRAC * diag, CURVE_SAMPLES) ?: return null
-        if (curve.size < 3) return null
-        val box = Rect.bounding(curve)
-        return RecognizedShape(ShapeKind.CURVE, box.topLeft, Pt(box.right, box.bottom), curve)
+        val controls = CubicFit.fit(path, CURVE_FIT_TOL_FRAC * diag) ?: return null
+        val box = Rect.bounding(CubicFit.sample(controls, CURVE_SAMPLES))
+        return RecognizedShape(ShapeKind.CURVE, box.topLeft, Pt(box.right, box.bottom), controls = controls)
     }
 
-    // --- closed paths: polygon (incl. rectangle) or ellipse/circle ---
+    // --- closed paths: polygon (incl. rectangle), capsule or ellipse/circle ---
 
     private fun recognizeClosed(points: List<Pt>, bbox: Rect, diag: Double): RecognizedShape? {
         // Resample evenly around the loop (including the closing segment) so the corner/roundness
         // tests are insensitive to where the stroke started and to uneven sampling speed.
         val loop = resampleClosed(points, RESAMPLE_N)
+        // On its own axes, minus any lap past the start, and dense enough for a thin loop's ends.
+        val axes = principalFrame(resampleClosed(withoutLap(points), FINE_RESAMPLE_N))
+
+        // Before the corners, since a thin capsule's round ends can read as a box's corners.
+        if (axes != null && isCapsule(axes)) return axes.shape(ShapeKind.CAPSULE)
 
         // Sharp, straight-edged corners win: that is what tells a hexagon from a circle.
         polygonFrom(loop, cornerPeaks(loop, wrap = true), bbox, diag)?.let { return it }
 
         // No clean corners: a round outline snaps to an ellipse (a circle when nearly round).
-        if (ellipseResidual(loop, bbox) <= ELLIPSE_RESIDUAL_FRAC) return ellipseOrCircle(bbox)
+        roundFrom(loop, bbox, axes)?.let { return it }
 
         // Neither corners nor a round fit, so the corner window may have swallowed a short edge:
         // retry on a denser loop with tighter windows. This is what recovers a long thin rectangle,
@@ -260,6 +315,154 @@ object ShapeRecognizer {
             return RecognizedShape(ShapeKind.RECTANGLE, box.topLeft, Pt(box.right, box.bottom))
         }
         return RecognizedShape(ShapeKind.POLYGON, box.topLeft, Pt(box.right, box.bottom), snapped)
+    }
+
+    /**
+     * The ellipse a round [loop] traces: turned to match when it is a clear oval lying turned, which
+     * its upright [bbox] reads worse, else upright; null when no ellipse follows it.
+     */
+    private fun roundFrom(loop: List<Pt>, bbox: Rect, axes: Frame?): RecognizedShape? {
+        val upright = ellipseResidual(loop, bbox)
+        val along = if (axes != null) ellipseResidual(axes.local, axes.box) else Double.MAX_VALUE
+        if (axes != null && along <= ELLIPSE_RESIDUAL_FRAC) {
+            if (abs(axes.turn) > AXIS_SNAP_RAD && axes.aspect < CIRCLE_ASPECT_MIN && along < upright) {
+                return axes.shape(ShapeKind.ELLIPSE)
+            }
+            // Nearly upright, but too thin for its bounds to read it: set upright on its own axes.
+            if (upright > ELLIPSE_RESIDUAL_FRAC) return ellipseOrCircle(axes.upright)
+        }
+        return if (upright <= ELLIPSE_RESIDUAL_FRAC) ellipseOrCircle(bbox) else null
+    }
+
+    /**
+     * Whether the loop in [f] is a capsule: long enough to have sides, followed closely, at least as
+     * closely as by an oval, and with ends clearly round rather than a box's rounded corners.
+     */
+    private fun isCapsule(f: Frame): Boolean {
+        if (f.aspect > CAPSULE_MAX_ASPECT) return false
+        val box = f.box
+        val capsule = rms(f.local) { toCapsule(it, box) }
+        if (capsule > CAPSULE_FIT * min(box.w, box.h) / 2.0) return false
+        if (capsule > rms(f.local) { toOval(it, box) }) return false
+        // A box's rounded corners fit as well elsewhere; only each end's diagonal tells them apart.
+        val half = abs(box.w - box.h) / 2.0
+        val long = box.w >= box.h
+        val diagonals = f.local.filter {
+            val along = abs(if (long) it.x - box.centerX else it.y - box.centerY) - half
+            val turn = atan2(abs(if (long) it.y - box.centerY else it.x - box.centerX), along)
+            along > 0.0 && turn in PI / 8.0..3.0 * PI / 8.0
+        }
+        if (diagonals.size < CAPSULE_MIN_END_POINTS) return false
+        return rms(diagonals) { toCapsule(it, box) } <= CAPSULE_OVER_BOX * rms(diagonals) { toBox(it, box) }
+    }
+
+    /** Distance from [p] to the capsule filling [box], its round ends on the short sides. */
+    private fun toCapsule(p: Pt, box: Rect): Double {
+        val r = min(box.w, box.h) / 2.0
+        val long = box.w >= box.h
+        val along = abs(if (long) p.x - box.centerX else p.y - box.centerY)
+        val across = if (long) p.y - box.centerY else p.x - box.centerX
+        return hypot(max(along - (max(box.w, box.h) / 2.0 - r), 0.0), across) - r
+    }
+
+    /** Distance from [p] to the outline of [box]. */
+    private fun toBox(p: Pt, box: Rect): Double {
+        val dx = abs(p.x - box.centerX) - box.w / 2.0
+        val dy = abs(p.y - box.centerY) - box.h / 2.0
+        return if (dx <= 0.0 && dy <= 0.0) max(dx, dy) else hypot(max(dx, 0.0), max(dy, 0.0))
+    }
+
+    /** Distance from [p] to the ellipse filling [box], to first order. */
+    private fun toOval(p: Pt, box: Rect): Double {
+        val rx = box.w / 2.0
+        val ry = box.h / 2.0
+        val x = p.x - box.centerX
+        val y = p.y - box.centerY
+        val grad = 2.0 * hypot(x / (rx * rx), y / (ry * ry))
+        return if (grad > 1e-12) (x * x / (rx * rx) + y * y / (ry * ry) - 1.0) / grad else min(rx, ry)
+    }
+
+    private inline fun rms(points: List<Pt>, dist: (Pt) -> Double): Double {
+        var sumSq = 0.0
+        for (p in points) {
+            val d = dist(p)
+            sumSq += d * d
+        }
+        return sqrt(sumSq / points.size)
+    }
+
+    /** A loop seen in a frame turned by [turn]: its points there ([local]) and their bounds ([box]). */
+    private class Frame(val turn: Double, val local: List<Pt>, val box: Rect) {
+        val aspect: Double get() = min(box.w, box.h) / max(box.w, box.h)
+
+        /** The frame's box set upright about the loop's centre on the page. */
+        val upright: Rect
+            get() {
+                val c = box.center
+                val x = c.x * cos(turn) - c.y * sin(turn)
+                val y = c.x * sin(turn) + c.y * cos(turn)
+                return Rect(x - box.w / 2.0, y - box.h / 2.0, box.w, box.h)
+            }
+
+        /** A [kind] filling the frame, turned with it unless it lies within [AXIS_SNAP_DEG] of upright. */
+        fun shape(kind: ShapeKind): RecognizedShape {
+            val r = upright
+            return RecognizedShape(kind, r.topLeft, Pt(r.right, r.bottom), rotation = if (abs(turn) <= AXIS_SNAP_RAD) 0.0 else turn)
+        }
+    }
+
+    /**
+     * [loop] in the frame of its principal axes, whichever of the two lies nearer upright so a label
+     * inside stays readable; null when it has no extent across one of them.
+     */
+    private fun principalFrame(loop: List<Pt>): Frame? {
+        var sx = 0.0
+        var sy = 0.0
+        for (p in loop) {
+            sx += p.x
+            sy += p.y
+        }
+        val cx = sx / loop.size
+        val cy = sy / loop.size
+        var xx = 0.0
+        var yy = 0.0
+        var xy = 0.0
+        for (p in loop) {
+            val dx = p.x - cx
+            val dy = p.y - cy
+            xx += dx * dx
+            yy += dy * dy
+            xy += dx * dy
+        }
+        var turn = 0.5 * atan2(2.0 * xy, xx - yy)
+        if (turn > PI / 4.0) turn -= PI / 2.0 else if (turn < -PI / 4.0) turn += PI / 2.0
+        val cs = cos(turn)
+        val sn = sin(turn)
+        val local = loop.map { Pt(it.x * cs + it.y * sn, -it.x * sn + it.y * cs) }
+        val box = Rect.bounding(local)
+        if (min(box.w, box.h) < 1e-6) return null
+        return Frame(turn, local, box)
+    }
+
+    /**
+     * [points] up to where the stroke, past its halfway mark, comes back nearest its start: a lap
+     * past the start is cut off, and a stroke that stops short of it stays whole.
+     */
+    private fun withoutLap(points: List<Pt>): List<Pt> {
+        val total = pathLength(points)
+        var walked = 0.0
+        var best = points.size - 1
+        var bestD = Double.MAX_VALUE
+        for (i in 1 until points.size) {
+            walked += points[i - 1].distanceTo(points[i])
+            if (walked < total / 2.0) continue
+            val d = points[i].distanceTo(points[0])
+            if (d < bestD) {
+                bestD = d
+                best = i
+            }
+        }
+        return if (best < points.size - 1) points.subList(0, best + 1) else points
     }
 
     /** Near-round ellipse -> a true circle (centred square box); a clear oval stays an ellipse. */

@@ -93,7 +93,7 @@ void TextOverlay::relayout() {
     layout_.clearLayout();
     layout_.setText(text);
     layout_.setFont(font_);
-    QTextOption option(Qt::AlignLeft);
+    QTextOption option(field_.centred ? Qt::AlignHCenter : Qt::AlignLeft);  // a shape's label is centred
     option.setWrapMode(QTextOption::WordWrap);
     layout_.setTextOption(option);
     const double leading = QFontMetricsF(font_).leading();

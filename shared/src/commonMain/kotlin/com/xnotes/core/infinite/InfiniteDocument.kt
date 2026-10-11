@@ -225,6 +225,9 @@ class InfiniteDocument(
 
     fun containsRef(item: CanvasItem): Boolean = backing.any { it === item }
 
+    /** [containsRef] in constant time, off the order map the culling already keeps. */
+    fun holds(item: CanvasItem): Boolean = orderMap().containsKey(item)
+
     fun indexOfRef(item: CanvasItem): Int = backing.indexOfFirst { it === item }
 
     // --- in-place mutation ---

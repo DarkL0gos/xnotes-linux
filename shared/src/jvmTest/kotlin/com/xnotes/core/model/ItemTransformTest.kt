@@ -5,7 +5,7 @@ import com.xnotes.core.geometry.Affine
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import org.junit.Assert.assertEquals
@@ -60,22 +60,33 @@ class ItemTransformTest {
         assertEquals(ShapeKind.RECTANGLE, s.shape)
         assertEquals(Pt(0.0, 0.0), s.start)
         assertEquals(Pt(200.0, 100.0), s.end)
-        assertEquals(6.0, s.strokeWidth, 1e-9)
-        assertNull(s.points)
+        assertEquals(3.0, s.strokeWidth, 1e-9) // a shape keeps its outline width
+        assertNull(s.path)
     }
 
-    @Test fun rotateRectangleBecomesPolygon() {
+    @Test fun scaleArrowKeepsItsHeadSize() {
+        val s = ShapeItem(ShapeKind.ARROW, Pt(0.0, 0.0), Pt(100.0, 0.0), Rgba(0, 0, 0), 4.0)
+        fun head() = s.paths().last().contours.single().let { c -> listOf(c.start) + c.segments.map { it.end } }
+        val before = head()
+        s.applyTransform(Affine.scaleAbout(Pt.ZERO, 3.0, 3.0))
+        val after = head()
+        assertEquals(Pt(300.0, 0.0), s.end)
+        assertEquals(4.0, s.strokeWidth, 1e-9)
+        assertEquals(before[0].distanceTo(before[2]), after[0].distanceTo(after[2]), 1e-9)
+    }
+
+    @Test fun aQuarterTurnLeavesAnUprightRectangle() {
         val s = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 3.0)
         s.applyTransform(Affine.rotateAbout(Pt(50.0, 25.0), PI / 2)) // about the box centre
-        assertEquals(ShapeKind.POLYGON, s.shape)
-        assertNotNull(s.points)
-        assertEquals(4, s.points!!.size)
+        assertEquals(ShapeKind.RECTANGLE, s.shape)
+        assertEquals(0.0, s.rotation, 0.0)
+        assertNull(s.path)
         assertEquals(3.0, s.strokeWidth, 1e-9) // rotation keeps the width
-        // A 100x50 rect turned 90 degrees about its centre bounds to 50x100 at (25,-25).
-        assertEquals(25.0, s.start.x, 1e-9)
-        assertEquals(-25.0, s.start.y, 1e-9)
-        assertEquals(75.0, s.end.x, 1e-9)
-        assertEquals(75.0, s.end.y, 1e-9)
+        // A 100x50 rect turned 90 degrees about its centre is the upright 50x100 one at (25,-25).
+        assertEquals(25.0, s.box.left, 1e-9)
+        assertEquals(-25.0, s.box.top, 1e-9)
+        assertEquals(75.0, s.box.right, 1e-9)
+        assertEquals(75.0, s.box.bottom, 1e-9)
     }
 
     @Test fun rotateLineKeepsKind() {
@@ -86,14 +97,16 @@ class ItemTransformTest {
         assertEquals(10.0, s.end.y, 1e-9)
     }
 
-    @Test fun shapeSnapshotRestoresKindAfterRotation() {
+    @Test fun shapeSnapshotRestoresKindAfterAShear() {
         val s = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 3.0)
         val snap = s.snapshotGeometry()
         s.applyTransform(Affine.rotateAbout(Pt(50.0, 25.0), PI / 4))
+        s.applyTransform(Affine.scaleAbout(Pt.ZERO, 2.0, 1.0))
         assertEquals(ShapeKind.POLYGON, s.shape)
         s.restoreGeometry(snap)
         assertEquals(ShapeKind.RECTANGLE, s.shape)
-        assertNull(s.points)
+        assertEquals(0.0, s.rotation, 0.0)
+        assertNull(s.path)
         assertEquals(Pt(100.0, 50.0), s.end)
     }
 

@@ -2,13 +2,23 @@ package com.xnotes.core.infinite
 
 import com.xnotes.canvas.HandleId
 import com.xnotes.canvas.SelectionMath
+import com.xnotes.core.geometry.Affine
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.model.CanvasItem
+import com.xnotes.core.model.ConnectorEnd
+import com.xnotes.core.model.ConnectorItem
+import com.xnotes.core.model.Glue
 import com.xnotes.core.model.ImageData
 import com.xnotes.core.model.ImageItem
+import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.Routing
+import com.xnotes.core.model.ShapeItem
 import com.xnotes.core.model.Stroke
 import com.xnotes.core.stroke.Sample
+import com.xnotes.core.shapes.Axis
+import com.xnotes.core.shapes.Elbow
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolDefaults
 import org.junit.Assert.assertEquals
@@ -229,6 +239,86 @@ class CanvasSelectionTest {
         assertTrue("a resized stroke should look zoomed, not just longer", s.config.baseWidth > before)
     }
 
+    @Test fun scalingAShapeKeepsItsOutlineWidth() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 100.0), Rgba(0, 0, 0), 3.0)
+        val sel = CanvasSelection(docOf(r))
+        sel.select(listOf(r))
+        sel.beginTransform()
+        sel.resizeLive(HandleId.BR, Pt(200.0, 200.0))
+        assertTrue(r.box.w > 100.0)
+        assertEquals(3.0, r.strokeWidth, 1e-9)
+    }
+
+    @Test fun aPartialBakeLeavesTheRestAlone() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 100.0), Rgba(0, 0, 0), 3.0)
+        val s = line(0.0, 200.0)
+        val sel = CanvasSelection(docOf(r, s))
+        sel.select(listOf(r, s))
+        sel.beginTransform()
+        val twice = Affine.scaleAbout(Pt.ZERO, 2.0, 2.0)
+        sel.applyLiveTo(setOf(r), twice)
+        sel.applyLiveTo(setOf(r), twice)
+        assertEquals("baked from the start, never compounded", Pt(200.0, 200.0), r.end)
+        assertEquals("the stroke rides the lift instead", Pt(20.0, 200.0), s.centroid())
+        sel.applyLiveTo(setOf(r), Affine.IDENTITY)
+        assertEquals(Pt(100.0, 100.0), r.end)
+    }
+
+    @Test fun aLoneShapeIsBoxedByItsOwnTurnedFrame() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 2.0)
+        r.applyTransform(Affine.rotateAbout(Pt(50.0, 25.0), 0.5))
+        val sel = CanvasSelection(docOf(r))
+        sel.select(listOf(r))
+        val box = sel.box!!
+        assertEquals(0.5, box.angle, 1e-12)
+        assertEquals("the box is the frame itself", 50.0, box.halfW, 1e-9)
+        assertTrue(sel.isFramedShape)
+        assertEquals("the outline's reach plus the gap", 12.0, sel.chromeMargin(10.0), 1e-9)
+        assertEquals(62.0, sel.chromeBox(10.0)!!.halfW, 1e-9)
+    }
+
+    @Test fun aCircleOffersCornerHandlesOnly() {
+        val c = ShapeItem(ShapeKind.CIRCLE, Pt(0.0, 0.0), Pt(50.0, 50.0), Rgba(0, 0, 0), 2.0)
+        val sel = CanvasSelection(docOf(c))
+        sel.select(listOf(c))
+        assertEquals(setOf(HandleId.TL, HandleId.TR, HandleId.BL, HandleId.BR), sel.handles(10.0).map { it.id }.toSet())
+    }
+
+    @Test fun aFramedResizeKeepsTheShapeEdgeBehindTheHandle() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 2.0)
+        val sel = CanvasSelection(docOf(r))
+        sel.select(listOf(r))
+        val margin = sel.chromeMargin(10.0)
+        sel.beginTransform()
+        sel.resizeLive(HandleId.R, Pt(100.0 + margin + 30.0, 25.0), margin)
+        assertEquals(130.0, r.box.right, 1e-9)
+        assertEquals(2.0, r.strokeWidth, 1e-9)
+    }
+
+    @Test fun resizingATurnedShapeByItsOwnHandleKeepsItARectangle() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 2.0)
+        r.applyTransform(Affine.rotateAbout(Pt(50.0, 25.0), 0.5))
+        val sel = CanvasSelection(docOf(r))
+        sel.select(listOf(r))
+        sel.beginTransform()
+        val box = sel.box!!
+        sel.resizeLive(HandleId.R, box.localToWorld(Pt(box.halfW + 40.0, 0.0)))
+        assertEquals(ShapeKind.RECTANGLE, r.shape)
+        assertEquals(0.5, r.rotation, 1e-9)
+        assertTrue(r.box.w > 130.0)
+        assertEquals(50.0, r.box.h, 1e-9)
+    }
+
+    @Test fun aGroupKeepsTheUprightBox() {
+        val r = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 50.0), Rgba(0, 0, 0), 2.0)
+        r.applyTransform(Affine.rotateAbout(Pt(50.0, 25.0), 0.5))
+        val s = line(0.0, 200.0)
+        val sel = CanvasSelection(docOf(r, s))
+        sel.select(listOf(r, s))
+        assertEquals(0.0, sel.box!!.angle, 0.0)
+        assertTrue(!sel.isFramedShape)
+    }
+
     // --- rotating ---
 
     @Test fun aRotationTurnsTheBox() {
@@ -354,4 +444,117 @@ class CanvasSelectionTest {
         for (i in 0 until mesh.vertexCount) maxX = maxOf(maxX, mesh.positions[2 * i])
         return maxX - 100.0
     }
+
+    // --- carrying what a shape holds ---
+
+    private fun frame() = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(200.0, 100.0), Rgba(1, 2, 3, 255), 2.0)
+
+    @Test fun aMovedFrameTakesItsContentsAndOneUndoPutsAllBack() {
+        val f = frame()
+        val note = line(20.0, 50.0)
+        val stray = line(400.0, 50.0)
+        val doc = docOf(f, note, stray)
+        val sel = CanvasSelection(doc).apply { select(listOf(f)) }
+        sel.beginTransform(carrying = true)
+        assertEquals(listOf<CanvasItem>(note), sel.carry.items)
+        val was = note.bounds()
+        sel.moveLive(30.0, 5.0)
+        assertEquals(was.left + 30.0, note.bounds().left, 1e-6)
+        assertEquals(400.0 - 1.5, stray.bounds().left, 1e-6)
+        val cmd = sel.buildCommand(movedOnly = true, dx = 30.0, dy = 5.0)!!
+        cmd.undo()
+        assertEquals(was.left, note.bounds().left, 1e-6)
+        assertEquals(0.0, f.box.left, 1e-9)
+        cmd.redo()
+        assertEquals(was.left + 30.0, note.bounds().left, 1e-6)
+    }
+
+    @Test fun aResizedFrameScalesItsContentsWithIt() {
+        val f = frame()
+        val note = line(80.0, 50.0)
+        val doc = docOf(f, note)
+        val sel = CanvasSelection(doc).apply { select(listOf(f)) }
+        val before = note.samples.map { it.pos }
+        sel.beginTransform(carrying = true)
+        val right = sel.handles().first { it.id == HandleId.R }.content
+        sel.resizeLive(HandleId.R, Pt(right.x + 200.0, right.y))
+        val k = f.box.w / 200.0
+        assertTrue("the frame widened", k > 1.5)
+        for ((was, now) in before.zip(note.samples.map { it.pos })) {
+            assertEquals("stretched with the frame", f.box.left + (was.x - 0.0) * k, now.x, 1e-3)
+            assertEquals(was.y, now.y, 1e-3)
+        }
+        val cmd = sel.buildCommand(movedOnly = false)!!
+        cmd.undo()
+        assertEquals(before.first().x, note.samples.first().pos.x, 1e-3)
+    }
+
+    @Test fun aTurnedFrameTurnsItsContentsWithIt() {
+        val f = frame()
+        val note = line(20.0, 50.0)
+        val doc = docOf(f, note)
+        val sel = CanvasSelection(doc).apply { select(listOf(f)) }
+        sel.beginTransform(Pt(100.0, -40.0), carrying = true)
+        sel.rotateLive(Pt(240.0, 50.0))
+        val first = note.samples.first().pos
+        val want = Affine.rotateAbout(Pt(100.0, 50.0), Math.PI / 2).apply(Pt(20.0, 50.0))
+        assertEquals(0.0, first.distanceTo(want), 1e-3)
+    }
+
+    @Test fun aPointEditCarriesNothingAndNeitherDoesASelectedItem() {
+        val f = frame()
+        val note = line(20.0, 50.0)
+        val doc = docOf(f, note)
+        val sel = CanvasSelection(doc).apply { select(listOf(f)) }
+        sel.beginTransform()
+        assertTrue(sel.carry.isEmpty)
+        sel.select(listOf(f, note))
+        sel.beginTransform(carrying = true)
+        assertTrue("already moving with the selection", sel.carry.isEmpty)
+    }
+
+    // --- connectors ---
+
+    private fun rect(l: Double, t: Double, r: Double, b: Double) = ShapeItem(ShapeKind.RECTANGLE, Pt(l, t), Pt(r, b), Rgba(1, 2, 3, 255))
+
+    private fun joining(a: ShapeItem, b: ShapeItem) = ConnectorItem(
+        Routing.ELBOW, ConnectorEnd(Glue.point(a, 5)!!.at, a, 5), ConnectorEnd(Glue.point(b, 7)!!.at, b, 7), Rgba(1, 2, 3, 255),
+    ).apply { elbow = Elbow(Axis.H, doubleArrayOf(200.0)) }
+
+    @Test fun movingAShapeTakesWhatIsGluedToItAlongInOneUndoStep() {
+        val a = rect(0.0, 0.0, 100.0, 60.0)
+        val b = rect(300.0, 100.0, 400.0, 160.0)
+        val c = joining(a, b)
+        val doc = docOf(a, b, c)
+        val sel = CanvasSelection(doc)
+        sel.select(listOf(b))
+        sel.beginTransform(carrying = true)
+        sel.moveLive(0.0, 50.0)
+        assertEquals(Pt(300.0, 180.0), c.end.at)
+        val cmd = sel.buildCommand(movedOnly = true, dx = 0.0, dy = 50.0)!!
+        cmd.undo()
+        assertEquals(Pt(300.0, 130.0), c.end.at)
+        assertEquals(Pt(300.0, 100.0), b.box.topLeft)
+        cmd.redo()
+        assertEquals(Pt(300.0, 180.0), c.end.at)
+    }
+
+    @Test fun aLoneConnectorDraggedByItsLineLetsGoAndUndoGluesItBack() {
+        val a = rect(0.0, 0.0, 100.0, 60.0)
+        val b = rect(300.0, 100.0, 400.0, 160.0)
+        val c = joining(a, b)
+        val doc = docOf(a, b, c)
+        val sel = CanvasSelection(doc)
+        sel.select(listOf(c))
+        assertNull("a lone connector has no box to grab", sel.chromeBox())
+        sel.beginTransform(carrying = true, pin = false)
+        sel.moveLive(20.0, 20.0)
+        c.letGo()
+        val cmd = sel.buildCommand(movedOnly = true, dx = 20.0, dy = 20.0)!!
+        assertNull(c.start.target)
+        cmd.undo()
+        assertSame(a, c.start.target)
+        assertEquals(Pt(100.0, 30.0), c.start.at)
+    }
 }
+

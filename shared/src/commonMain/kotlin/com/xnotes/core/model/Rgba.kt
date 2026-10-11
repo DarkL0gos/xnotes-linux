@@ -8,6 +8,9 @@ data class Rgba(val r: Int, val g: Int, val b: Int, val a: Int = 255) {
 
     fun withAlpha(newAlpha: Int): Rgba = copy(a = newAlpha.coerceIn(0, 255))
 
+    /** Perceived brightness in [0, 1], by the Rec. 709 weights. */
+    fun luminance(): Double = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+
     /** Packed ARGB (the platform-neutral 0xAARRGGBB packing the Renderer consumes). */
     fun toArgb(): Int =
         ((a and 0xFF) shl 24) or ((r and 0xFF) shl 16) or ((g and 0xFF) shl 8) or (b and 0xFF)

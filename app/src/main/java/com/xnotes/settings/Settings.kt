@@ -1,5 +1,6 @@
 package com.xnotes.settings
 
+import com.xnotes.core.model.PageTemplates
 import com.xnotes.core.infinite.CanvasBackground
 import com.xnotes.core.model.PagePattern
 import com.xnotes.core.model.PageStyle
@@ -10,7 +11,7 @@ import com.xnotes.core.text.FlowMargins
 import com.xnotes.core.tools.EraseMode
 import com.xnotes.core.tools.InkPalette
 import com.xnotes.core.tools.ShapeConfig
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.tools.ToolDefaults
@@ -208,7 +209,7 @@ data class Settings(
 
         private fun pageStyleJson(s: PageStyle) = JSONObject()
             .apply { s.pageColor?.let { put("page_color", rgbaArr(it)) } }
-            .apply { s.pattern?.let { put("pattern", it.id) } }
+            .apply { s.template?.let { put(if (it == PageTemplates.NONE || PageTemplates.isBuiltIn(it)) "pattern" else "template", it) } }
             .apply { s.patternColor?.let { put("pattern_color", rgbaArr(it)) } }
             .apply { s.spacing?.let { put("spacing", it) } }
 
@@ -216,7 +217,8 @@ data class Settings(
             if (o == null) return PageStyle()
             return PageStyle(
                 pageColor = rgba(o.optJSONArray("page_color")),
-                pattern = PagePattern.fromId(o.optString("pattern", "")),
+                template = o.optString("template", "").takeIf { it.isNotEmpty() }
+                    ?: PagePattern.fromId(o.optString("pattern", ""))?.id,
                 patternColor = rgba(o.optJSONArray("pattern_color")),
                 spacing = if (o.has("spacing")) o.optDouble("spacing") else null,
             )
@@ -327,13 +329,16 @@ data class Settings(
         }
 
         private fun shapeConfigJson(c: ShapeConfig) = JSONObject()
+            .put("preset", c.preset)
             .put("shape", c.shape.id).put("stroke_width", c.strokeWidth).put("fill", c.fill)
             .put("fill_alpha", c.fillAlpha)
             .put("neon", c.neon).put("neon_strength", c.neonStrength)
             .put("dashed", c.dashed).put("dash_length", c.dashLength).put("dash_gap", c.dashGap)
 
         private fun shapeConfig(o: JSONObject) = ShapeConfig(
-            shape = ShapeKind.fromId(o.optString("shape", "rectangle")),
+            // Settings from before presets name only a kind; its preset stands in.
+            preset = (com.xnotes.core.shapes.ShapePresets.byKey(o.optString("preset", ""))
+                ?: com.xnotes.core.shapes.ShapePresets.forKind(ShapeKind.fromId(o.optString("shape", "rectangle")))).key,
             strokeWidth = o.optDouble("stroke_width", 3.0),
             fill = o.optBoolean("fill", false),
             fillAlpha = o.optDouble("fill_alpha", ShapeConfig.FILL_ALPHA)

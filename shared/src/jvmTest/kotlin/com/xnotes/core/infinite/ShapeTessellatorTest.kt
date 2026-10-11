@@ -1,9 +1,19 @@
 package com.xnotes.core.infinite
 
+import com.xnotes.core.FakeTextMeasurer
 import com.xnotes.core.geometry.Pt
+import com.xnotes.core.geometry.Rect
 import com.xnotes.core.model.Rgba
 import com.xnotes.core.model.ShapeItem
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.model.ShapeLabel
+import com.xnotes.core.model.TextStyle
+import com.xnotes.core.pal.FillRule
+import com.xnotes.core.pal.FontFace
+import com.xnotes.core.pal.Pen
+import com.xnotes.core.shapes.PathRole
+import com.xnotes.core.shapes.ShapePath
+import com.xnotes.core.shapes.ShapeKind
+import com.xnotes.core.vector.PathFlattener
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -187,7 +197,7 @@ class ShapeTessellatorTest {
     }
 
     @Test fun everyIndexPointsAtARealVertex() {
-        for (kind in ShapeKind.entries) {
+        for (kind in ShapeKind.all) {
             val s = if (kind == ShapeKind.POLYGON || kind == ShapeKind.POLYLINE) {
                 ShapeItem.poly(
                     kind, listOf(Pt(0.0, 0.0), Pt(40.0, 5.0), Pt(20.0, 40.0)),
@@ -203,6 +213,79 @@ class ShapeTessellatorTest {
                 }
             }
         }
+    }
+
+    // --- paths ---
+
+    private val ink = Rgba(1, 1, 1, 255)
+    private val pen = Pen(ink, 4.0, cosmetic = false)
+
+    @Test fun aBigCircleOutlineSkipsDiscsAlongItsCurve() {
+        val circle = ShapeItem(ShapeKind.CIRCLE, Pt(0.0, 0.0), Pt(1000.0, 1000.0), ink, 4.0)
+        val tol = StrokeTessellator.DEFAULT_TOLERANCE
+        val spine = PathFlattener.flatten(circle.paths().single().contours.single(), tol).size
+        assertEquals("a quad per step and no disc", 4 * spine, ShapeTessellator.outlineMesh(circle, tol).vertexCount)
+    }
+
+    @Test fun aCircleOutlineFollowsTheTrueCurve() {
+        val circle = ShapeItem(ShapeKind.CIRCLE, Pt(0.0, 0.0), Pt(1000.0, 1000.0), ink, 4.0)
+        val mesh = ShapeTessellator.outlineMesh(circle, StrokeTessellator.DEFAULT_TOLERANCE)
+        val d = 500.0 / kotlin.math.sqrt(2.0)
+        assertTrue("on the curve at 45 degrees", covers(mesh, 500.0 + d, 500.0 + d))
+        val out = (500.0 + 3.0) / kotlin.math.sqrt(2.0)
+        assertTrue("clear of it past the half width", !covers(mesh, 500.0 + out, 500.0 + out))
+    }
+
+    @Test fun aConvexFillIsAFan() {
+        val e = shape(ShapeKind.ELLIPSE)
+        val n = PathFlattener.flatten(e.paths().single().contours.single(), 0.01).size
+        assertEquals(n - 2, ShapeTessellator.fillMesh(e, 0.01).triangleCount)
+    }
+
+    private fun ring(tolerance: Double): List<MeshPart> {
+        val outer = ShapePath.ellipseContour(50.0, 50.0, 50.0, 50.0)
+        val inner = ShapePath.ellipseContour(50.0, 50.0, 25.0, 25.0)
+        val path = ShapePath(listOf(outer, inner), PathRole.OUTLINE, FillRule.EVEN_ODD)
+        return ShapeTessellator.tessellate(listOf(path), Rgba(9, 9, 9, 80), pen, tolerance)
+    }
+
+    @Test fun aRingFillLeavesItsHoleEmpty() {
+        val fill = ring(0.05).first()
+        assertEquals(InkPass.OPAQUE, fill.pass)
+        assertTrue("in the band", covers(fill.mesh, 50.0, 12.0))
+        assertTrue("not in the hole", !covers(fill.mesh, 50.0, 50.0))
+    }
+
+    @Test fun aFillTooFineToClipTakesTheStencil() {
+        assertEquals(InkPass.EVEN_ODD, ring(1e-5).first().pass)
+    }
+
+    @Test fun shadedFacesBecomeTheirOwnParts() {
+        val box = Rect(0.0, 0.0, 10.0, 10.0)
+        val paths = listOf(
+            ShapePath.rect(box, PathRole.FILL_ONLY),
+            ShapePath.rect(box, PathRole.SHADE_DARK),
+            ShapePath.rect(box, PathRole.SHADE_LIGHT),
+            ShapePath.rect(box),
+        )
+        val fill = Rgba(100, 100, 100, 255)
+        val parts = ShapeTessellator.tessellate(paths, fill, pen, 0.01)
+        assertEquals(5, parts.size)
+        assertEquals("fill, dark and light", 3, parts.dropLast(1).map { it.color }.distinct().size)
+        assertEquals(ink, parts.last().color)
+    }
+
+    @Test fun hiddenEdgesDashOnASolidShape() {
+        val line = listOf(Pt(0.0, 0.0), Pt(200.0, 0.0))
+        fun area(role: PathRole) = area(ShapeTessellator.tessellate(listOf(ShapePath.polyline(line, role)), null, pen, 0.01).single().mesh)
+        assertTrue(area(PathRole.HIDDEN) < area(PathRole.STROKE_ONLY) * 0.9)
+    }
+
+    @Test fun aHeadStaysSolidOnADashedShape() {
+        val line = listOf(Pt(0.0, 0.0), Pt(200.0, 0.0))
+        val dashed = pen.copy(dashed = true, dashOn = 10.0, dashGap = 10.0)
+        fun area(p: Pen) = area(ShapeTessellator.tessellate(listOf(ShapePath.polyline(line, PathRole.HEAD)), null, p, 0.01).single().mesh)
+        assertEquals(area(pen), area(dashed), 1e-6)
     }
 
     // --- dash runs ---
@@ -227,5 +310,25 @@ class ShapeTessellatorTest {
         val path = listOf(Pt(0.0, 0.0), Pt(50.0, 0.0))
         assertEquals(1, MeshBuilder.dashRuns(path, 0.0, 10.0, closed = false).size)
         assertEquals(1, MeshBuilder.dashRuns(path, 10.0, 0.0, closed = false).size)
+    }
+
+    @Test fun aLabelMeshesAsGlyphsInItsColourTurnedWithTheShape() {
+        val red = Rgba(220, 20, 20, 255)
+        val s = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(200.0, 100.0), Rgba(0, 0, 0, 255), 2.0)
+        s.label = ShapeLabel("ab c", TextStyle(red, 10.0, FontFace.SANS), FakeTextMeasurer())
+        s.applyTransform(com.xnotes.core.geometry.Affine.rotateAbout(s.box.center, 0.3))
+        val part = ShapeTessellator.labelPart(s)!!
+        assertEquals(red, part.color)
+        assertEquals("a glyph square per visible character, two triangles each", 6, part.mesh.triangleCount)
+        val frame = s.labelRect()!!.outset(1e-6)
+        for (i in 0 until part.mesh.vertexCount) {
+            val local = s.toLocal(Pt(part.mesh.positions[2 * i], part.mesh.positions[2 * i + 1]))
+            assertTrue("glyph vertex $local outside the label", frame.contains(local))
+        }
+        val meshed = ItemMesher.mesh(s)!!
+        assertEquals("outline, then the words over it", red, meshed.parts.last().color)
+        s.labelHidden = true
+        assertEquals(null, ShapeTessellator.labelPart(s))
+        assertEquals(1, ItemMesher.mesh(s)!!.parts.size)
     }
 }

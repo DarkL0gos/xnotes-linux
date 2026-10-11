@@ -72,6 +72,9 @@ data class Affine(
     companion object {
         val IDENTITY = Affine(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
+        /** Move by ([dx], [dy]). */
+        fun translateBy(dx: Double, dy: Double): Affine = Affine(1.0, 0.0, 0.0, 1.0, dx, dy)
+
         /** Scale by ([sx], [sy]) about [pivot], which stays fixed. */
         fun scaleAbout(pivot: Pt, sx: Double, sy: Double): Affine =
             Affine(sx, 0.0, 0.0, sy, pivot.x * (1.0 - sx), pivot.y * (1.0 - sy))

@@ -450,6 +450,7 @@ private fun itemIcon(item: ToolbarItem): ImageVector = when (item) {
     ToolbarItem.TEXT -> XnotesIcons.text
     ToolbarItem.TEXT_BOX -> XnotesIcons.textBox
     ToolbarItem.IMAGE -> XnotesIcons.image
+    ToolbarItem.MARKUP -> ImageVector.vectorResource(R.drawable.ic_stroke_highlighter)
     ToolbarItem.UNDO -> XnotesIcons.undo
     ToolbarItem.REDO -> XnotesIcons.redo
     ToolbarItem.PAGE_NAV -> XnotesIcons.prev

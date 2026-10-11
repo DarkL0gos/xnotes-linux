@@ -12,7 +12,7 @@ import kotlin.math.abs
  */
 object XmlDigests {
     const val FLOW_BYTES = "c411f70c768064b214a591b4ece458168df02361c5036e0424e6247558ff7367"
-    const val FLOW_READ = "4feafcfe93f88f478ed0ec6f753c1ed96fd6410dfb26d2ae6a4e8dda760345bf"
+    const val FLOW_READ = "0a3991ac4b0c858a2d9d182007c099fd7fca8633adfeaa4fa010ea418fe0c433"
     /** The scene's structure (every number masked) must match exactly... */
     const val SCENE_SHAPE = "20433c5f8b9f43cecfc03ad57685c8e9aa9cf37b147c41827fb30c5902ab4cc8"
 

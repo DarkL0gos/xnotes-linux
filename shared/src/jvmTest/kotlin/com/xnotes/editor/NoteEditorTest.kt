@@ -144,8 +144,8 @@ class NoteEditorTest {
     }
 
     @Test fun styleAndMarginChangesAreNotUndoable() {
-        editor.setDocumentStyle(PageStyle(pattern = PagePattern.GRID))
-        assertEquals(PagePattern.GRID, editor.documentStyle.pattern)
+        editor.setDocumentStyle(PageStyle(template = PagePattern.GRID.id))
+        assertEquals(PagePattern.GRID.id, editor.documentStyle.template)
         editor.setCurrentPageMargins(PageMargins(top = 40.0))
         assertEquals(40.0, editor.currentPageMargins.top!!, 0.0)
         assertTrue(state.document.dirty)

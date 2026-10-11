@@ -12,8 +12,8 @@ import kotlin.math.abs
  * Returns null when one cubic can't follow the stroke within tolerance (a wide arc past a cubic's
  * reach, or a complex scribble), so it is left as ink rather than forced into a wrong curve.
  *
- * Pure and deterministic so it can be unit-tested on the plain JVM, like [StrokeEngine]. The
- * renderer has no cubic primitive, so the curve is handed back sampled as a dense polyline.
+ * Pure and deterministic so it can be unit-tested on the plain JVM, like [StrokeEngine]. The curve
+ * comes back as its four control points; [sample] walks it when a polyline is wanted.
  */
 object CubicFit {
 
@@ -22,7 +22,17 @@ object CubicFit {
 
     /** Fit one cubic to [points] and return it sampled to [samples]+1 points; null when the single
      *  cubic strays from the stroke by more than [maxError] (leave it as ink). */
-    fun fitSampled(points: List<Pt>, maxError: Double, samples: Int): List<Pt>? {
+    fun fitSampled(points: List<Pt>, maxError: Double, samples: Int): List<Pt>? =
+        fit(points, maxError)?.let { sample(it, samples) }
+
+    /** The cubic through [controls] (start, two handles, end) at [samples]+1 even steps of t. */
+    fun sample(controls: List<Pt>, samples: Int): List<Pt> {
+        val b = Cubic(controls[0], controls[1], controls[2], controls[3])
+        return List(samples + 1) { eval(b, it.toDouble() / samples) }
+    }
+
+    /** Fit one cubic to [points]: its four control points, or null when it strays past [maxError]. */
+    fun fit(points: List<Pt>, maxError: Double): List<Pt>? {
         val pts = dedupe(points)
         if (pts.size < 4) return null
         val tHat1 = (pts[1] - pts[0]).normalized()
@@ -39,7 +49,7 @@ object CubicFit {
             iter++
         }
         if (err > maxError) return null
-        return List(samples + 1) { eval(bez, it.toDouble() / samples) }
+        return listOf(bez.p0, bez.p1, bez.p2, bez.p3)
     }
 
     private class Cubic(val p0: Pt, val p1: Pt, val p2: Pt, val p3: Pt)

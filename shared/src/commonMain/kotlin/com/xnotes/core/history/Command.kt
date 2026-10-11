@@ -5,9 +5,14 @@ import com.xnotes.core.model.Document
 import com.xnotes.core.model.DrawStyle
 import com.xnotes.core.model.GeoHandle
 import com.xnotes.core.model.GeometrySnapshot
+import com.xnotes.core.model.Labelled
 import com.xnotes.core.model.Page
 import com.xnotes.core.model.Resizable
+import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.ShapeItem
+import com.xnotes.core.model.ShapeLabel
 import com.xnotes.core.model.TextItem
+import com.xnotes.core.model.TextMarkup
 import com.xnotes.core.model.TextStyle
 
 /**
@@ -30,6 +35,13 @@ interface Command {
      * item currently sits on, for commands that hold items but not pages.
      */
     fun touched(locate: (CanvasItem) -> Page?): List<Pair<Page, CanvasItem>>? = null
+
+    /**
+     * The markups this command's undo/redo puts on or takes off, each with its page, so the view
+     * repaints the page backgrounds just where they lie. Markups are immutable, so a restyle names
+     * the old and the new one.
+     */
+    fun touchedMarkups(): List<Pair<Page, TextMarkup>> = emptyList()
 }
 
 /** Append an item to a page (finishing a stroke, pasting/inserting, new text). */
@@ -205,6 +217,23 @@ class RestyleText(
     override fun touched(locate: (CanvasItem) -> Page?) = pagedItems(listOf(item), locate)
 }
 
+/** Type, retype, restyle or clear a label: labels are immutable, so the two sides are kept whole. */
+class EditLabel(
+    private val item: Labelled,
+    private val oldLabel: ShapeLabel?,
+    private val newLabel: ShapeLabel?,
+) : Command {
+    override fun redo() {
+        item.label = newLabel
+    }
+
+    override fun undo() {
+        item.label = oldLabel
+    }
+
+    override fun touched(locate: (CanvasItem) -> Page?) = pagedItems(listOf(item), locate)
+}
+
 /**
  * Restyle drawn items (ink colour and stroke width) in place. Each item keeps its own before/after
  * pair, so undoing a mixed selection puts every item back to the style it actually had.
@@ -221,6 +250,30 @@ class RestyleItems(private val entries: List<Entry>) : Command {
     }
 
     override fun touched(locate: (CanvasItem) -> Page?) = pagedItems(entries.map { it.item }, locate)
+}
+
+/** Recolour shapes' fills, each keeping its own opacity: one step for the whole selection. */
+class RefillShapes(private val entries: List<Entry>) : Command {
+    class Entry(val shape: ShapeItem, val before: Rgba?, val after: Rgba?)
+
+    override fun redo() {
+        for (e in entries) e.shape.fillRgba = e.after
+    }
+
+    override fun undo() {
+        for (e in entries) e.shape.fillRgba = e.before
+    }
+
+    override fun touched(locate: (CanvasItem) -> Page?) = pagedItems(entries.map { it.shape }, locate)
+
+    companion object {
+        /** The entries that recolour [shapes]' fills in [color] (null: each in its outline's), unchanged ones left out. */
+        fun of(shapes: List<ShapeItem>, color: Rgba?): List<Entry> = shapes.mapNotNull { s ->
+            val f = s.fillRgba ?: return@mapNotNull null
+            val next = (color ?: s.strokeRgba).copy(a = f.a)
+            if (next == f) null else Entry(s, f, next)
+        }
+    }
 }
 
 /**
@@ -295,6 +348,8 @@ class CompositeCommand(private val commands: List<Command>) : Command {
         for (c in commands) out.addAll(c.touched(locate) ?: return null)
         return out
     }
+
+    override fun touchedMarkups(): List<Pair<Page, TextMarkup>> = commands.flatMap { it.touchedMarkups() }
 }
 
 /** Delete a page (reversible by re-inserting at its original index). */

@@ -69,7 +69,7 @@ class ItemMesherTest {
 
     @Test fun aShapeMeshesAsFillThenOutline() {
         val s = com.xnotes.core.model.ShapeItem(
-            com.xnotes.core.tools.ShapeKind.RECTANGLE,
+            com.xnotes.core.shapes.ShapeKind.RECTANGLE,
             com.xnotes.core.geometry.Pt(0.0, 0.0),
             com.xnotes.core.geometry.Pt(40.0, 20.0),
             Rgba(1, 2, 3, 255), 3.0, Rgba(9, 9, 9, 64),

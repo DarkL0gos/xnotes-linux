@@ -1064,7 +1064,7 @@ class InfiniteEditor(context: Context) : ToolPopupHost, SelectionMenuHost, LongP
     }
 
     /** The shape being dragged out, drawn live over the committed geometry like a wet stroke. */
-    private fun publishPendingShape(shape: ShapeItem?) {
+    private fun publishPendingShape(shape: CanvasItem?) {
         if (shape == null) {
             scene.setWet(null, InkPalette.DEFAULT, InkPass.OPAQUE, Rect(0.0, 0.0, 0.0, 0.0))
             return

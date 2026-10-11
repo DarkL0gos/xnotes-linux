@@ -3,7 +3,7 @@ package com.xnotes.core.model
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.history.RestyleItems
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolDefaults
 import org.junit.Assert.assertEquals

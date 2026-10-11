@@ -40,6 +40,7 @@ val Tool.labelRes: Int
         Tool.TEXT -> R.string.tool_text
         Tool.TEXT_BOX -> R.string.tool_text_box
         Tool.IMAGE -> R.string.tool_image
+        Tool.MARKUP -> R.string.tool_markup
     }
 
 @get:StringRes
@@ -65,6 +66,7 @@ val ToolbarItem.labelRes: Int
         ToolbarItem.TEXT -> R.string.tool_text
         ToolbarItem.TEXT_BOX -> R.string.tool_text_box
         ToolbarItem.IMAGE -> R.string.tool_image
+        ToolbarItem.MARKUP -> R.string.tool_markup
         ToolbarItem.UNDO -> R.string.undo
         ToolbarItem.REDO -> R.string.redo
         ToolbarItem.PAGE_NAV -> R.string.toolbar_page_nav

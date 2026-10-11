@@ -189,7 +189,7 @@ class DesktopCanvasViewTest {
     }
 
     @Test fun pageRulingIsPainted() {
-        val doc = Document.blank(count = 1).apply { pages[0].style = pages[0].style.copy(pattern = PagePattern.LINES) }
+        val doc = Document.blank(count = 1).apply { pages[0].style = pages[0].style.copy(template = PagePattern.LINES.id) }
         setUp(doc)
         val probe = onFirstPage(0.5, 0.5)
         // Lined paper: somewhere in a band of rows through the page there is a line that isn't paper.

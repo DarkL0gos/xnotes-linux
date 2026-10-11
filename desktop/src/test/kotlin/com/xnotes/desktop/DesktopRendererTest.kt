@@ -14,7 +14,7 @@ import com.xnotes.core.model.TextItem
 import com.xnotes.core.pal.FontFace
 import com.xnotes.core.pal.FontSpec
 import com.xnotes.core.pal.BlendMode
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.stroke.Sample
@@ -42,7 +42,7 @@ class DesktopRendererTest {
             ImageIO.write(blue, "png", imageFile)
             val doc = Document.blankPixels(width = 120.0, height = 140.0)
             val page = doc.pages[0]
-            page.style = PageStyle(pageColor = Rgba(255, 255, 255), pattern = PagePattern.NONE)
+            page.style = PageStyle(pageColor = Rgba(255, 255, 255), template = PagePattern.NONE.id)
             page.items += ShapeItem(ShapeKind.RECTANGLE, Pt(10.0, 10.0), Pt(45.0, 45.0),
                 Rgba(0, 0, 0), fillRgba = Rgba(220, 0, 0))
             page.items += ImageItem(ImageData(imageFile, 2, 2), Rect(60.0, 10.0, 35.0, 35.0))

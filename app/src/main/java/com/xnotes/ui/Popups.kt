@@ -54,7 +54,8 @@ import com.xnotes.core.model.Rgba
 import com.xnotes.core.pal.FontFace
 import com.xnotes.core.tools.EraseMode
 import com.xnotes.core.tools.ShapeConfig
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
+import com.xnotes.core.shapes.ShapePresets
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConversions
 import com.xnotes.platform.FontCatalog
@@ -244,11 +245,11 @@ fun StylesPopup(editor: Editor, onDismiss: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                ModeChip(stringResource(R.string.default_choice), style.pattern == null) { apply(style.copy(pattern = null)) }
-                ModeChip(stringResource(R.string.none), style.pattern == PagePattern.NONE) { apply(style.copy(pattern = PagePattern.NONE)) }
-                ModeChip(stringResource(R.string.pattern_lines), style.pattern == PagePattern.LINES) { apply(style.copy(pattern = PagePattern.LINES)) }
-                ModeChip(stringResource(R.string.pattern_dots), style.pattern == PagePattern.DOTS) { apply(style.copy(pattern = PagePattern.DOTS)) }
-                ModeChip(stringResource(R.string.pattern_grid), style.pattern == PagePattern.GRID) { apply(style.copy(pattern = PagePattern.GRID)) }
+                ModeChip(stringResource(R.string.default_choice), style.template == null) { apply(style.copy(template = null)) }
+                ModeChip(stringResource(R.string.none), style.template == PagePattern.NONE.id) { apply(style.copy(template = PagePattern.NONE.id)) }
+                ModeChip(stringResource(R.string.pattern_lines), style.template == PagePattern.LINES.id) { apply(style.copy(template = PagePattern.LINES.id)) }
+                ModeChip(stringResource(R.string.pattern_dots), style.template == PagePattern.DOTS.id) { apply(style.copy(template = PagePattern.DOTS.id)) }
+                ModeChip(stringResource(R.string.pattern_grid), style.template == PagePattern.GRID.id) { apply(style.copy(template = PagePattern.GRID.id)) }
             }
 
             Spacer(Modifier.size(12.dp))
@@ -716,8 +717,8 @@ fun ShapeConfigPopup(editor: ToolPopupHost, onDismiss: () -> Unit) {
     var gapLen by remember { mutableStateOf(editor.hostShapeConfig.dashGap.toFloat()) }
 
     fun emit() = editor.updateShapeConfig(
-        ShapeConfig(
-            shape = kind,
+        editor.hostShapeConfig.copy(
+            preset = ShapePresets.forKind(kind).key,
             strokeWidth = width.toDouble(),
             fill = fill,
             fillAlpha = (fillOpacity / 100.0).coerceIn(ShapeConfig.FILL_ALPHA_MIN, ShapeConfig.FILL_ALPHA_MAX),
@@ -733,7 +734,7 @@ fun ShapeConfigPopup(editor: ToolPopupHost, onDismiss: () -> Unit) {
         Column(Modifier.width(284.dp).padding(horizontal = 14.dp, vertical = 8.dp)) {
             PopupTitle(stringResource(R.string.title_shape))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ShapeKind.DRAW_TOOL_KINDS.forEach { k ->
+                DRAW_TOOL_KINDS.forEach { k ->
                     KindChip(shapeIcon(k), k.id, selected = kind == k) { kind = k; emit() }
                 }
             }
@@ -815,14 +816,17 @@ internal fun SliderRow(
     }
 }
 
+/** The kinds this build's shape picker offers (the original app pages through many more). */
+private val DRAW_TOOL_KINDS = listOf(ShapeKind.LINE, ShapeKind.ARROW, ShapeKind.RECTANGLE, ShapeKind.ELLIPSE, ShapeKind.CIRCLE, ShapeKind.TRIANGLE)
+
 /** Glyph shown in the shape-kind picker for each [ShapeKind]. */
 private fun shapeIcon(kind: ShapeKind): ImageVector = when (kind) {
-    ShapeKind.LINE, ShapeKind.POLYLINE, ShapeKind.CURVE -> XnotesIcons.shapeLine
     ShapeKind.ARROW -> XnotesIcons.shapeArrow
     ShapeKind.RECTANGLE -> XnotesIcons.shapeRect
     ShapeKind.ELLIPSE -> XnotesIcons.shapeEllipse
     ShapeKind.CIRCLE -> XnotesIcons.shapeCircle
-    ShapeKind.TRIANGLE, ShapeKind.POLYGON -> XnotesIcons.shapeTriangle
+    ShapeKind.TRIANGLE -> XnotesIcons.shapeTriangle
+    else -> XnotesIcons.shapeLine
 }
 
 @Composable

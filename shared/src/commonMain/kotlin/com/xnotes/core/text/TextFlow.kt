@@ -1,7 +1,9 @@
 package com.xnotes.core.text
 
+import com.xnotes.core.platform.identityMap
 import com.xnotes.core.model.Rgba
 import com.xnotes.core.pal.FontFace
+import kotlin.math.roundToInt
 
 /** Paragraph alignment. [id] is the stable serialized token. */
 enum class ParaAlign(val id: String) {
@@ -29,9 +31,9 @@ enum class ListKind(val id: String) {
 
 /**
  * Immutable character style for a run. Nullable fields inherit the flow defaults
- * ([TextFlow.defaultColor]/[TextFlow.defaultSizePt]/[TextFlow.defaultFace]);
- * [code] renders in [TextFlow.monoFace] with a subtle background. Equality
- * drives run merging, so keep this a value type.
+ * ([TextFlow.defaultColor]/[TextFlow.defaultFace]), and a null size the paragraph's
+ * ([Paragraph.textSizePt]); [code] renders in [TextFlow.monoFace] with a subtle
+ * background. Equality drives run merging, so keep this a value type.
  */
 data class CharStyle(
     val bold: Boolean = false,
@@ -43,6 +45,10 @@ data class CharStyle(
     val highlight: Rgba? = null,
     val sizePt: Double? = null,
     val face: FontFace? = null,
+    /** Marks a run whose text is LaTeX, drawn as the formula it sets. */
+    val math: Boolean = false,
+    /** A [math] run set as display rather than inline: bigger operators, its own line. */
+    val mathDisplay: Boolean = false,
 ) {
     companion object {
         val DEFAULT = CharStyle()
@@ -67,6 +73,12 @@ class Paragraph(
     var checked: Boolean = false,
     /** Non-null marks a code line; "" means plain/unhighlighted code. */
     var codeLang: String? = null,
+    /** Non-null makes this paragraph cell text of that table (see [FlowTable]). */
+    var table: FlowTable? = null,
+    /** True on the first paragraph of each table cell. */
+    var cellStart: Boolean = false,
+    /** 1..[MAX_HEADING] marks a heading, whose text takes its size from the level; 0 is body text. */
+    var headingLevel: Int = 0,
 ) {
     /** Bumped on any content or style mutation; layout caches key on it. */
     var rev: Int = 0
@@ -80,16 +92,35 @@ class Paragraph(
 
     fun plainText(): String = runs.joinToString("") { it.text }
 
+    /** The size text with none of its own sets at here: the flow's base, scaled for a heading. */
+    fun textSizePt(flow: TextFlow): Double =
+        if (headingLevel > 0) headingSizePt(headingLevel, flow.defaultSizePt) else flow.defaultSizePt
+
     /** True when every paragraph-level property is at its default (runs not considered). */
     fun isDefaultStyle(): Boolean =
-        align == ParaAlign.LEFT && indent == 0 && list == ListKind.NONE && !checked && codeLang == null
+        align == ParaAlign.LEFT && indent == 0 && list == ListKind.NONE && !checked && codeLang == null &&
+            table == null && headingLevel == 0
 
+    /** A copy sharing [table]; [TextFlow.deepCopy] remaps it onto copied tables. */
     fun deepCopy(): Paragraph =
-        Paragraph(runs.mapTo(mutableListOf()) { it.deepCopy() }, align, indent, list, checked, codeLang)
+        Paragraph(runs.mapTo(mutableListOf()) { it.deepCopy() }, align, indent, list, checked, codeLang, table, cellStart, headingLevel)
             .also { it.rev = rev }
 
     companion object {
         const val MAX_INDENT = 6
+        const val MAX_HEADING = 6
+
+        // A geometric run at about 1.125 a step, so every level is visibly its own and
+        // h1 lands on twice the body size. The tail has to stay above 1.0: a heading
+        // that measures the same as body text is only bold, which is not a level.
+        private val HEADING_SCALE = doubleArrayOf(2.0, 1.75, 1.55, 1.4, 1.25, 1.1)
+
+        /** A heading's own text: bold, its size left to the level so it follows the base. */
+        val HEADING_STYLE = CharStyle(bold = true)
+
+        /** The size heading [level] sets at over [baseSizePt]. */
+        fun headingSizePt(level: Int, baseSizePt: Double): Double =
+            baseSizePt * HEADING_SCALE[(level - 1).coerceIn(HEADING_SCALE.indices)]
     }
 }
 
@@ -194,7 +225,10 @@ class TextFlow {
 
     fun deepCopy(): TextFlow {
         val copy = TextFlow()
-        paragraphs.mapTo(copy.paragraphs) { it.deepCopy() }
+        val tables = identityMap<FlowTable, FlowTable>()
+        paragraphs.mapTo(copy.paragraphs) { p ->
+            p.deepCopy().also { c -> c.table = p.table?.let { t -> tables.getOrPut(t) { t.copy() } } }
+        }
         copy.margins = margins
         copy.defaultFace = defaultFace
         copy.defaultSizePt = defaultSizePt
@@ -215,7 +249,7 @@ class TextFlow {
 /**
  * The flow's document-level defaults as one value: what the text tool's config
  * popup edits, what "Default for new notes" saves, and what new notes are
- * stamped with. Empty (all built-ins) means nothing to stamp or persist.
+ * stamped with. The factory size depends on the screen ([sizeForScreen]).
  */
 data class FlowDefaults(
     val face: FontFace = FontFace.SANS,
@@ -224,6 +258,7 @@ data class FlowDefaults(
     val color: Rgba? = null,
     val margins: FlowMargins = FlowMargins(),
 ) {
+    /** All the file format's built-ins, which a note need not record (not a device's factory). */
     val isEmpty: Boolean get() = this == FlowDefaults()
 
     fun applyTo(flow: TextFlow) {
@@ -237,5 +272,22 @@ data class FlowDefaults(
     companion object {
         fun of(flow: TextFlow): FlowDefaults =
             FlowDefaults(flow.defaultFace, flow.monoFace, flow.defaultSizePt, flow.defaultColor, flow.margins)
+
+        /**
+         * The factory text size for a screen whose shorter side is [shortSideDp]. A
+         * narrower screen shows the fitted page smaller, so the size grows in inverse
+         * proportion to look the same on every screen, in whole points held to 6..36.
+         */
+        fun sizeForScreen(shortSideDp: Double): Double {
+            if (!(shortSideDp > 0.0)) return TextFlow.DEFAULT_SIZE_PT
+            val pt = TABLET_PT * TABLET_DP / shortSideDp
+            return pt.roundToInt().toDouble().coerceIn(MIN_SCREEN_PT, MAX_SCREEN_PT)
+        }
+
+        // Chosen by eye on a Galaxy Tab S9 FE.
+        private const val TABLET_DP = 823.0
+        private const val TABLET_PT = 12.0
+        private const val MIN_SCREEN_PT = 6.0
+        private const val MAX_SCREEN_PT = 36.0
     }
 }

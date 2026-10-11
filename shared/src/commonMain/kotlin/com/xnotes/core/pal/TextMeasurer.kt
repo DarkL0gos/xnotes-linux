@@ -1,6 +1,7 @@
 package com.xnotes.core.pal
 
 import com.xnotes.core.geometry.Rect
+import com.xnotes.core.vector.VectorContour
 
 /** Font vertical metrics in content px; both values are positive distances from the baseline. */
 data class LineMetrics(val ascent: Double, val descent: Double) {
@@ -30,4 +31,11 @@ interface TextMeasurer {
      * [Renderer.drawTextRun] draws with, so prefix sums match drawn glyph positions.
      */
     fun advances(text: String, font: FontSpec): DoubleArray
+
+    /**
+     * [text] laid out as [measure] lays it out, as closed glyph outlines from the block's top-left:
+     * how the infinite canvas, which draws only triangles, sets a shape's label. Empty when the
+     * host cannot outline text.
+     */
+    fun outline(text: String, font: FontSpec, wrapWidth: Double, flags: TextFlags = TextFlags()): List<VectorContour> = emptyList()
 }

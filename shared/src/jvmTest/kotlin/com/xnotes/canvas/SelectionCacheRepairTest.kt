@@ -5,7 +5,6 @@ import com.xnotes.core.FakeTextMeasurer
 import com.xnotes.core.history.History
 import com.xnotes.core.model.Document
 import com.xnotes.core.model.Page
-import com.xnotes.core.model.Rgba
 import com.xnotes.core.model.Stroke
 import com.xnotes.core.stroke.Sample
 import com.xnotes.core.tools.Tool

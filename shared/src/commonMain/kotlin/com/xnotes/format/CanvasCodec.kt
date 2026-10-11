@@ -6,14 +6,21 @@ import com.xnotes.core.infinite.CanvasBackground
 import com.xnotes.core.infinite.InfiniteDocument
 import com.xnotes.core.infinite.Waypoint
 import com.xnotes.core.model.CanvasItem
+import com.xnotes.core.model.ConnectorEnd
+import com.xnotes.core.model.ConnectorItem
 import com.xnotes.core.model.ImageData
 import com.xnotes.core.model.ImageItem
 import com.xnotes.core.model.PagePattern
 import com.xnotes.core.model.PageSize
 import com.xnotes.core.model.PageStyle
 import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.Routing
 import com.xnotes.core.model.ShapeItem
+import com.xnotes.core.model.ShapeLabel
 import com.xnotes.core.model.Stroke
+import com.xnotes.core.model.TextItem
+import com.xnotes.core.model.TextStyle
+import com.xnotes.core.pal.FontFace
 import com.xnotes.core.pal.ImageCodec
 import com.xnotes.core.platform.DEFLATE_BEST_SPEED
 import com.xnotes.core.platform.File
@@ -28,8 +35,13 @@ import com.xnotes.core.platform.parseInstant
 import com.xnotes.core.platform.pathString
 import com.xnotes.core.platform.InputStream
 import com.xnotes.core.platform.OutputStream
+import com.xnotes.core.pal.TextMeasurer
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.Axis
+import com.xnotes.core.shapes.Elbow
+import com.xnotes.core.shapes.FreePath
+import com.xnotes.core.shapes.Head
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.tools.ToolDefaults
@@ -37,6 +49,7 @@ import com.xnotes.core.util.Svg
 import okio.FileSystem
 import okio.buffer
 import okio.use
+import com.xnotes.core.vector.PathFlattener
 
 /** Thrown when a file is not a valid `.xcanvas` bundle. */
 class XCanvasFormatException(message: String) : Exception(message)
@@ -57,7 +70,7 @@ class XCanvasFormatException(message: String) : Exception(message)
  * model defaults, and new optional fields are written only when set so older readers stay
  * compatible. Strokes stay editable vector samples; nothing is flattened.
  */
-class CanvasCodec(private val imageCodec: ImageCodec) {
+class CanvasCodec(private val imageCodec: ImageCodec, private val textMeasurer: TextMeasurer) {
 
     /** Thrown out of [write] when [isCancelled] turns true mid-copy, so the caller can discard the partial file. */
     class WriteCancelled : Exception()
@@ -122,7 +135,8 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         }
         j.name("items").beginArray()
         val nextAsset = intArrayOf(0)
-        for (item in doc.items) writeItem(j, item, assets, nextAsset)
+        val ids = GlueIds.of(doc.items)
+        for (item in doc.items) writeItem(j, item, assets, nextAsset, ids)
         j.endArray()
         j.endObject()
     }
@@ -132,15 +146,17 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         item: CanvasItem,
         assets: List<Pair<String, File>>,
         nextAsset: IntArray,
+        ids: Map<CanvasItem, Int>,
     ) {
         when (item) {
             is Stroke -> writeStroke(j, item)
             is ImageItem -> {
                 // The name was decided by [imageAssets]' walk of these same items; taking it from
                 // there keeps the entry and the manifest agreeing by construction.
-                assets.getOrNull(nextAsset[0]++)?.let { writeImage(j, item, it.first) }
+                assets.getOrNull(nextAsset[0]++)?.let { writeImage(j, item, it.first, ids[item]) }
             }
-            is ShapeItem -> writeShape(j, item)
+            is ShapeItem -> writeShape(j, item, ids[item])
+            is ConnectorItem -> writeConnector(j, item, ids)
             else -> {} // text and any unrecognized kind: not written, the canvas has none
         }
     }
@@ -230,9 +246,11 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         j.endObject()
     }
 
-    private fun writeImage(j: JsonWrite, item: ImageItem, assetName: String) {
+    private fun writeImage(j: JsonWrite, item: ImageItem, assetName: String, id: Int?) {
         j.beginObject()
         j.name("kind").value(ImageItem.KIND)
+        // Only on an item a connector glues to.
+        id?.let { j.name("id").value(it) }
         j.name("asset").value(assetName)
         j.name("rect").beginArray().value(item.rect.x).value(item.rect.y).value(item.rect.w).value(item.rect.h).endArray()
         j.name("src_w").value(item.image.width)
@@ -243,21 +261,42 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         j.endObject()
     }
 
-    private fun writeShape(j: JsonWrite, s: ShapeItem) {
+    private fun writeShape(j: JsonWrite, s: ShapeItem, id: Int?) {
+        // A shape older readers cannot draw goes down as the polygon they can, its real geometry after.
+        val standIn = s.legacyOutline()
+        val drawn = standIn?.let { Rect.bounding(it) }
+        // Drawn text has no shape an older reader could stand in, so it goes under a kind they skip.
+        val glyphs = s.shape == ShapeKind.GLYPHS
         j.beginObject()
-        j.name("kind").value(ShapeItem.KIND)
-        j.name("shape").value(s.shape.id)
-        j.name("start").beginArray().value(s.start.x).value(s.start.y).endArray()
-        j.name("end").beginArray().value(s.end.x).value(s.end.y).endArray()
+        j.name("kind").value(if (glyphs) ShapeItem.GLYPHS_KIND else ShapeItem.KIND)
+        id?.let { j.name("id").value(it) }
+        j.name("shape").value(s.legacyId())
+        j.name("start").beginArray().value(drawn?.left ?: s.start.x).value(drawn?.top ?: s.start.y).endArray()
+        j.name("end").beginArray().value(drawn?.right ?: s.end.x).value(drawn?.bottom ?: s.end.y).endArray()
         j.name("stroke_rgba")
         writeRgba(j, s.strokeRgba)
         j.name("stroke_width").value(s.strokeWidth)
         j.name("fill_rgba")
         s.fillRgba?.let { writeRgba(j, it) } ?: j.nullValue()
         // Polygon/polyline carry their vertices (absolute content px); other kinds omit them.
-        s.vertices()?.let { verts ->
+        (standIn ?: s.vertices()?.takeUnless { glyphs })?.let { verts ->
             j.name("points").beginArray()
             for (p in verts) j.beginArray().value(p.x).value(p.y).endArray()
+            j.endArray()
+        }
+        if (standIn != null || glyphs) {
+            if (!s.isFree) j.name("geom").value(s.shape.id)
+            val f = s.box
+            j.name("rect").beginArray().value(f.x).value(f.y).value(f.w).value(f.h).endArray()
+            if (s.rotation != 0.0) j.name("angle").value(s.rotation)
+            s.path?.takeIf { s.isFree && (glyphs || !FreePath.isVertexList(it)) }?.let { j.name("path").value(FreePath.toSvg(it)) }
+        }
+        if (s.n != s.shape.defaultN) j.name("n").value(s.n)
+        if (s.headStart != s.shape.defaultHeadStart) j.name("head_start").value(s.headStart.id)
+        if (s.headEnd != s.shape.defaultHeadEnd) j.name("head_end").value(s.headEnd.id)
+        if (!s.adj.contentEquals(s.shape.defaultAdj)) {
+            j.name("adj").beginArray()
+            for (v in s.adj) j.value(v)
             j.endArray()
         }
         if (s.neon) {
@@ -269,7 +308,92 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
             j.name("dash_length").value(s.dashLength)
             j.name("dash_gap").value(s.dashGap)
         }
+        // A label is additive too: written only on a labelled shape.
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            j.name("label").beginObject()
+            j.name("text").value(l.text)
+            j.name("rgba")
+            writeRgba(j, l.style.rgba)
+            j.name("point_size").value(l.style.pointSize)
+            if (l.style.face != TextItem.DEFAULT_FACE) j.name("font_face").value(l.style.face.id)
+            if (s.labelAt != 0.5) j.name("at").value(s.labelAt)
+            j.endObject()
+        }
         if (s.locked) j.name("locked").value(true)
+        j.endObject()
+    }
+
+    /**
+     * A connector goes down as the plain polyline it draws, which older readers show as it is, and
+     * then as itself: its routing, its two ends (glued ones naming their item's id and point) and its
+     * route. Its style and label are a shape's.
+     */
+    private fun writeConnector(j: JsonWrite, c: ConnectorItem, ids: Map<CanvasItem, Int>) {
+        val line = PathFlattener.flatten(c.body(), STAND_IN_FLATTEN)
+        val drawn = Rect.bounding(line)
+        j.beginObject()
+        j.name("kind").value(ShapeItem.KIND)
+        ids[c]?.let { j.name("id").value(it) }
+        j.name("shape").value(ShapeKind.POLYLINE.id)
+        j.name("start").beginArray().value(drawn.left).value(drawn.top).endArray()
+        j.name("end").beginArray().value(drawn.right).value(drawn.bottom).endArray()
+        j.name("stroke_rgba")
+        writeRgba(j, c.strokeRgba)
+        j.name("stroke_width").value(c.strokeWidth)
+        j.name("fill_rgba").nullValue()
+        j.name("points").beginArray()
+        for (p in line) j.beginArray().value(p.x).value(p.y).endArray()
+        j.endArray()
+        if (c.headStart != Head.NONE) j.name("head_start").value(c.headStart.id)
+        if (c.headEnd != Head.NONE) j.name("head_end").value(c.headEnd.id)
+        if (c.neon) {
+            j.name("neon").value(true)
+            j.name("neon_strength").value(c.neonStrength)
+        }
+        if (c.dashed) {
+            j.name("dashed").value(true)
+            j.name("dash_length").value(c.dashLength)
+            j.name("dash_gap").value(c.dashGap)
+        }
+        j.name("connector").beginObject()
+        j.name("routing").value(c.routing.id)
+        j.name("from")
+        writeEnd(j, c.start, ids)
+        j.name("to")
+        writeEnd(j, c.end, ids)
+        if (c.routing.orthogonal) {
+            j.name("axis").value(if (c.elbow.first == Axis.H) "h" else "v")
+            j.name("coords").beginArray()
+            for (v in c.elbow.coords) j.value(v)
+            j.endArray()
+        } else if (c.waypoints.isNotEmpty()) {
+            j.name("waypoints").beginArray()
+            for (p in c.waypoints) j.beginArray().value(p.x).value(p.y).endArray()
+            j.endArray()
+        }
+        j.endObject()
+        c.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            j.name("label").beginObject()
+            j.name("text").value(l.text)
+            j.name("rgba")
+            writeRgba(j, l.style.rgba)
+            j.name("point_size").value(l.style.pointSize)
+            if (l.style.face != TextItem.DEFAULT_FACE) j.name("font_face").value(l.style.face.id)
+            if (c.labelAt != 0.5) j.name("at").value(c.labelAt)
+            j.endObject()
+        }
+        if (c.locked) j.name("locked").value(true)
+        j.endObject()
+    }
+
+    /** Where a connector end sits, and what it is glued to when that is in the file too. */
+    private fun writeEnd(j: JsonWrite, e: ConnectorEnd, ids: Map<CanvasItem, Int>) {
+        j.beginObject()
+        j.name("at").beginArray().value(e.at.x).value(e.at.y).endArray()
+        e.target?.let { ids[it] }?.let { id ->
+            j.name("item").value(id)
+            j.name("point").value(e.point)
+        }
         j.endObject()
     }
 
@@ -332,8 +456,15 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         var dropped = 0
         for (spec in m.images) {
             val item = materializeImage(spec, imageFiles)
-            if (item == null) dropped++ else items.add(spec.index - dropped, item)
+            if (item == null) {
+                dropped++
+            } else {
+                items.add(spec.index - dropped, item)
+                m.glue.named(item, spec.id)
+            }
         }
+        // Every item is in, so connectors can glue to whatever their ends name.
+        m.glue.resolve()
         doc.addAll(items)
         return doc
     }
@@ -378,6 +509,7 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         val waypoints = ArrayList<Waypoint>()
         val items = ArrayList<CanvasItem>()
         val images = ArrayList<PendingImage>()
+        val glue = GlueRead()
     }
 
     /** An image item parsed before its asset entry has streamed out of the zip. */
@@ -390,6 +522,7 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         val orientation: Int,
         val angle: Double,
         val locked: Boolean,
+        val id: Int?,
     )
 
     private fun parseManifest(p: JsonPull): ParsedManifest {
@@ -407,7 +540,7 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
                 "background" -> m.background = parseBackground(p)
                 "view" -> m.view = parseWaypoint(p, named = false)
                 "waypoints" -> parseWaypoints(p, m.waypoints)
-                "items" -> parseItems(p, m.items, m.images)
+                "items" -> parseItems(p, m.items, m.images, m.glue)
                 else -> p.skipValue()
             }
         }
@@ -471,10 +604,10 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         return Waypoint(if (named) Waypoint.sanitizeName(name) else "", cx, cy, zoom)
     }
 
-    private fun parseItems(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>) {
+    private fun parseItems(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>, glue: GlueRead) {
         if (p.peek() != JsonPull.Token.BEGIN_ARRAY) return p.skipValue()
         p.beginArray()
-        while (p.hasNext()) parseItem(p, items, pending)
+        while (p.hasNext()) parseItem(p, items, pending, glue)
         p.endArray()
     }
 
@@ -482,6 +615,8 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
     private class ItemScratch {
         var locked = false
         var kind: String? = null
+        var id: Int? = null
+        var connector: ConnectorScratch? = null
         var tool: String? = null
         var config: ConfigScratch? = null
         var samples: RawSamples? = null
@@ -495,6 +630,13 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         var orientation = 0
         var angle = 0.0
         var shape: String? = null
+        var geom: String? = null
+        var path: String? = null
+        var adj: DoubleArray? = null
+        var n = 0
+        var headStart: String? = null
+        var headEnd: String? = null
+        var label: LabelScratch? = null
         var start: Pt? = null
         var end: Pt? = null
         var strokeRgba: Rgba? = null
@@ -526,13 +668,15 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         var highlighterInverse: Boolean? = null
     }
 
-    private fun parseItem(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>) {
+    private fun parseItem(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>, glue: GlueRead) {
         if (p.peek() != JsonPull.Token.BEGIN_OBJECT) return p.skipValue()
         val s = ItemScratch()
         p.beginObject()
         while (p.hasNext()) {
             when (p.nextName()) {
                 "kind" -> s.kind = stringOr(p, "")
+                "id" -> s.id = intOrNull(p)
+                "connector" -> s.connector = parseConnector(p)
                 "tool" -> s.tool = stringOr(p, "")
                 "config" -> s.config = parseConfig(p)
                 "samples" -> s.samples = parseSamples(p)
@@ -546,6 +690,13 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
                 "orientation" -> s.orientation = intOr(p, 0)
                 "angle" -> s.angle = doubleOr(p, 0.0)
                 "shape" -> s.shape = stringOr(p, "")
+                "geom" -> s.geom = stringOrNull(p)
+                "path" -> s.path = stringOrNull(p)
+                "adj" -> s.adj = doublesOrNull(p)
+                "n" -> s.n = intOr(p, 0)
+                "head_start" -> s.headStart = stringOrNull(p)
+                "head_end" -> s.headEnd = stringOrNull(p)
+                "label" -> s.label = parseLabel(p)
                 "start" -> s.start = ptOrNull(p)
                 "end" -> s.end = ptOrNull(p)
                 "stroke_rgba" -> s.strokeRgba = rgbaOrNull(p)
@@ -571,14 +722,18 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
                     pending.add(
                         PendingImage(
                             items.size + pending.size, asset, s.rect, s.srcW, s.srcH,
-                            s.orientation, s.angle, s.locked,
+                            s.orientation, s.angle, s.locked, s.id,
                         ),
                     )
                 }
             }
-            ShapeItem.KIND -> items.add(buildShape(s))
+            ShapeItem.KIND, ShapeItem.GLYPHS_KIND -> {
+                val c = s.connector
+                items.add(if (c != null && s.kind == ShapeItem.KIND) buildConnector(s, c, glue) else buildShape(s))
+            }
             else -> {} // text and any unrecognized kind: skipped (forgiving)
         }
+        if (items.size > before) glue.named(items[before], s.id)
         // Absent on every canvas written before locking existed, which reads back as unlocked.
         if (s.locked && items.size > before) items[before].locked = true
     }
@@ -595,7 +750,7 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
             rgba = c?.rgba ?: def.rgba,
             speedStrength = c?.speedStrength ?: def.speedStrength,
             taperEnabled = c?.taperEnabled ?: def.taperEnabled,
-            taperMinFactor = c?.taperMinFactor ?: ToolDefaults.DEFAULT_TAPER_TIP,
+            taperMinFactor = c?.taperMinFactor ?: ToolDefaults.LEGACY_TAPER_TIP,
             neon = c?.neon ?: def.neon,
             neonStrength = c?.neonStrength ?: def.neonStrength,
             dashLength = c?.dashLength ?: def.dashLength,
@@ -609,6 +764,148 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
     }
 
     private fun buildShape(s: ItemScratch): ShapeItem {
+        val shape = buildDrawnShape(s)
+        // The real geometry behind a stand-in polygon; or else an old file's baked turn.
+        val frame = s.rect
+        if (frame != null && (s.geom != null || s.angle != 0.0 || s.path != null)) {
+            shape.restoreFrame(ShapeKind.fromIdOrNull(s.geom), frame, s.angle, FreePath.fromSvg(s.path))
+        } else {
+            shape.unbake()
+        }
+        if (s.n > 0) shape.n = s.n
+        s.adj?.let { shape.adj = it }
+        s.headStart?.let { shape.headStart = Head.fromId(it) }
+        s.headEnd?.let { shape.headEnd = Head.fromId(it) }
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            shape.label = ShapeLabel(l.text, TextStyle(l.rgba ?: shape.strokeRgba, l.pointSize, FontFace.fromId(l.fontFace)), textMeasurer)
+            l.at?.takeIf { it.isFinite() }?.let { shape.labelAt = it.coerceIn(0.0, 1.0) }
+        }
+        return shape
+    }
+
+    private class LabelScratch {
+        var text = ""
+        var rgba: Rgba? = null
+        var pointSize = TextItem.DEFAULT_POINT_SIZE
+        var fontFace = ""
+        var at: Double? = null
+    }
+
+    private fun parseLabel(p: JsonPull): LabelScratch? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        val l = LabelScratch()
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "text" -> l.text = stringOr(p, "")
+                "rgba" -> l.rgba = rgbaOrNull(p)
+                "point_size" -> l.pointSize = doubleOr(p, TextItem.DEFAULT_POINT_SIZE)
+                "font_face" -> l.fontFace = stringOr(p, "")
+                "at" -> l.at = doubleOrNull(p)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return l
+    }
+
+    private class ConnectorScratch {
+        var routing: String? = null
+        var from: EndRead? = null
+        var to: EndRead? = null
+        var axis: String? = null
+        var coords: DoubleArray? = null
+        var waypoints: List<Pt>? = null
+    }
+
+    private fun parseConnector(p: JsonPull): ConnectorScratch? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        val c = ConnectorScratch()
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "routing" -> c.routing = stringOrNull(p)
+                "from" -> c.from = parseEnd(p)
+                "to" -> c.to = parseEnd(p)
+                "axis" -> c.axis = stringOrNull(p)
+                "coords" -> c.coords = doublesOrNull(p)
+                "waypoints" -> c.waypoints = anyPoints(p)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return c
+    }
+
+    /** Every point of an array, however few: a straight connector may bend just once. */
+    private fun anyPoints(p: JsonPull): List<Pt>? {
+        if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
+            p.skipValue()
+            return null
+        }
+        val out = ArrayList<Pt>()
+        p.beginArray()
+        while (p.hasNext()) ptOrNull(p)?.let { out.add(it) }
+        p.endArray()
+        return out
+    }
+
+    private fun parseEnd(p: JsonPull): EndRead? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        var at: Pt? = null
+        var id: Int? = null
+        var point = -1
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "at" -> at = ptOrNull(p)
+                "item" -> id = intOrNull(p)
+                "point" -> point = intOr(p, -1)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return EndRead(at, id, point)
+    }
+
+    /**
+     * A connector from its stand-in polyline's fields and its own. Its ends stay loose until every
+     * item is read and [glue] can find what they name; a routing this version does not know draws
+     * as the line the stand-in runs along.
+     */
+    private fun buildConnector(s: ItemScratch, cs: ConnectorScratch, glue: GlueRead): ConnectorItem {
+        val pts = s.points.orEmpty()
+        val from = cs.from?.at ?: pts.firstOrNull() ?: s.start ?: Pt.ZERO
+        val to = cs.to?.at ?: pts.lastOrNull() ?: s.end ?: Pt.ZERO
+        val known = Routing.fromId(cs.routing)
+        val c = ConnectorItem(
+            known ?: Routing.STRAIGHT, ConnectorEnd(from), ConnectorEnd(to), s.strokeRgba ?: DEFAULT_SHAPE_STROKE, s.strokeWidth,
+            Head.fromId(s.headStart), Head.fromId(s.headEnd), s.dashed, s.dashLength, s.dashGap, s.neon, s.neonStrength,
+        )
+        val coords = cs.coords?.takeIf { v -> v.all { it.isFinite() } }
+        when {
+            known == null -> c.waypoints = pts.drop(1).dropLast(1)
+            known.orthogonal -> c.elbow = coords?.let { Elbow(if (cs.axis == "v") Axis.V else Axis.H, it) } ?: Elbow.of(pts.ifEmpty { listOf(from, to) })
+            else -> c.waypoints = cs.waypoints.orEmpty()
+        }
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            c.label = ShapeLabel(l.text, TextStyle(l.rgba ?: c.strokeRgba, l.pointSize, FontFace.fromId(l.fontFace)), textMeasurer)
+            l.at?.takeIf { it.isFinite() }?.let { c.labelAt = it.coerceIn(0.0, 1.0) }
+        }
+        glue.waiting(c, cs.from, cs.to)
+        return c
+    }
+
+    private fun buildDrawnShape(s: ItemScratch): ShapeItem {
         val kind = ShapeKind.fromId(s.shape)
         val strokeRgba = s.strokeRgba ?: DEFAULT_SHAPE_STROKE
         s.points?.let { verts ->
@@ -802,6 +1099,18 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
         return if (count >= 4) Rect(v[0], v[1], v[2], v[3]) else null
     }
 
+    private fun doublesOrNull(p: JsonPull): DoubleArray? {
+        if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
+            p.skipValue()
+            return null
+        }
+        val out = ArrayList<Double>()
+        p.beginArray()
+        while (p.hasNext()) doubleOrNull(p)?.takeIf { it.isFinite() }?.let { out.add(it) }
+        p.endArray()
+        return out.toDoubleArray()
+    }
+
     private fun pointsOrNull(p: JsonPull): List<Pt>? {
         if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
             p.skipValue()
@@ -827,6 +1136,9 @@ class CanvasCodec(private val imageCodec: ImageCodec) {
 
         /** Default shape outline colour for a shape whose stroke colour did not survive. */
         private val DEFAULT_SHAPE_STROKE = Rgba(0, 230, 118, 255)
+
+        /** How closely a curved connector's stand-in polyline follows it, in content px. */
+        private const val STAND_IN_FLATTEN = 0.25
 
         private const val NOT_XCANVAS = "Not an xnotes canvas"
     }

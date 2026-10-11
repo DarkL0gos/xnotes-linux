@@ -47,6 +47,9 @@ data class Obb(
 
     fun translate(dx: Double, dy: Double): Obb = copy(center = Pt(center.x + dx, center.y + dy))
 
+    /** The same box pushed [d] further out on every side. */
+    fun grow(d: Double): Obb = if (d == 0.0) this else copy(halfW = halfW + d, halfH = halfH + d)
+
     companion object {
         fun fromAabb(r: Rect): Obb = Obb(r.center, r.w / 2.0, r.h / 2.0, 0.0)
     }

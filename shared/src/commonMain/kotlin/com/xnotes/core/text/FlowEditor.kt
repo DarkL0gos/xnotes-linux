@@ -10,7 +10,8 @@ import com.xnotes.core.history.ParaSnapshot
  * The single mutation gateway for a [TextFlow] (spec: push-after-apply). Every
  * op applies its edit and returns the [Command] describing it (null when the
  * edit was a no-op), which the caller pushes onto the history. Runs are kept
- * normalized (no empty runs, adjacent equal styles merged) after every op.
+ * normalized (no empty runs, adjacent equal styles merged, no hand-set size in a
+ * heading) after every op.
  */
 class FlowEditor(private val flow: TextFlow) {
 
@@ -25,7 +26,8 @@ class FlowEditor(private val flow: TextFlow) {
      * Replace [range] with [text] in one undo step. New text takes [style] when
      * given, else the style at the range start (what a caret there would type).
      * New paragraphs from '\n' splits inherit the first paragraph's properties,
-     * with [Paragraph.checked] cleared on continuations. [adoptEndProps] makes a
+     * with [Paragraph.checked] cleared and [Paragraph.headingLevel] dropped on
+     * continuations that start empty (Enter at the end of a heading leaves it). [adoptEndProps] makes a
      * cross-paragraph merge keep the END paragraph's properties instead (the
      * forward-delete-into-a-block rule).
      */
@@ -61,6 +63,10 @@ class FlowEditor(private val flow: TextFlow) {
             return FlowEditParagraph(para, before, ParaSnapshot.of(para)) to caret
         }
 
+        val cells = CellIndex(flow.paragraphs)
+        if (!cells.isEmpty && cells.shapeOf(FlowRange(start, end)) != SelShape.Text) {
+            return TableEditor(flow).replaceSelection(FlowRange(start, end), text, style, cells)
+        }
         val first = flow.paragraphs[start.para]
         val props = if (adoptEndProps) flow.paragraphs[end.para] else first
         val insStyle = style ?: styleForInsert(first, start.offset)
@@ -76,6 +82,10 @@ class FlowEditor(private val flow: TextFlow) {
                 runs, props.align, props.indent, props.list,
                 checked = if (i == 0) props.checked else false,
                 codeLang = props.codeLang,
+                table = props.table,
+                cellStart = i == 0 && props.cellStart,
+                // A heading continues only into the remainder it was split into.
+                headingLevel = if (i == 0 || (i == lines.lastIndex && tail.isNotEmpty())) props.headingLevel else 0,
             ).also { normalize(it) }
         }
         val removed = flow.paragraphs.subList(start.para, end.para + 1).toList()
@@ -88,13 +98,9 @@ class FlowEditor(private val flow: TextFlow) {
     fun setCharStyle(range: FlowRange, mutate: (CharStyle) -> CharStyle): Command? {
         val r = range.normalized()
         if (r.collapsed || flow.paragraphs.isEmpty()) return null
-        val start = clamp(r.start)
-        val end = clamp(r.end)
         val cmds = mutableListOf<Command>()
-        for (pi in start.para..end.para) {
+        for ((pi, from, to) in CellIndex(flow.paragraphs).spans(flow.paragraphs, FlowRange(clamp(r.start), clamp(r.end)))) {
             val para = flow.paragraphs[pi]
-            val from = if (pi == start.para) start.offset else 0
-            val to = if (pi == end.para) end.offset else para.length
             if (to <= from) continue
             val before = ParaSnapshot.of(para)
             applyCharStyleWithin(para, from, to, mutate)
@@ -110,14 +116,22 @@ class FlowEditor(private val flow: TextFlow) {
     fun setParaStyle(range: FlowRange, mutate: (Paragraph) -> Unit): Command? {
         val r = range.normalized()
         if (flow.paragraphs.isEmpty()) return null
-        val start = clamp(r.start)
-        val end = clamp(r.end)
         val cmds = mutableListOf<Command>()
-        for (pi in start.para..end.para) {
+        val spans = CellIndex(flow.paragraphs).spans(flow.paragraphs, FlowRange(clamp(r.start), clamp(r.end)))
+        for (pi in spans.map { it.para }.distinct()) {
             val para = flow.paragraphs[pi]
             val before = ParaSnapshot.of(para)
             mutate(para)
             para.indent = para.indent.coerceIn(0, Paragraph.MAX_INDENT)
+            para.headingLevel = para.headingLevel.coerceIn(0, Paragraph.MAX_HEADING)
+            if (para.table != null) {
+                // Cells hold rich text only: no lists, code lines, headings or indents.
+                para.list = ListKind.NONE
+                para.checked = false
+                para.codeLang = null
+                para.indent = 0
+                para.headingLevel = 0
+            }
             if (!before.matches(para)) {
                 para.touch()
                 cmds += FlowEditParagraph(para, before, ParaSnapshot.of(para))
@@ -172,13 +186,13 @@ class FlowEditor(private val flow: TextFlow) {
 
     // --- internals ---
 
-    private fun combined(cmds: List<Command>): Command? = when {
+    internal fun combined(cmds: List<Command>): Command? = when {
         cmds.isEmpty() -> null
         cmds.size == 1 -> cmds[0]
         else -> CompositeCommand(cmds)
     }
 
-    private fun clamp(pos: FlowPos): FlowPos {
+    internal fun clamp(pos: FlowPos): FlowPos {
         val pi = pos.para.coerceIn(0, flow.paragraphs.size - 1)
         return FlowPos(pi, pos.offset.coerceIn(0, flow.paragraphs[pi].length))
     }
@@ -186,8 +200,27 @@ class FlowEditor(private val flow: TextFlow) {
     private fun runsOf(text: String, style: CharStyle): MutableList<Run> =
         if (text.isEmpty()) mutableListOf() else mutableListOf(Run(text, style))
 
-    private fun styleForInsert(para: Paragraph, offset: Int): CharStyle =
-        styleOfCharAt(para, if (offset > 0) offset - 1 else 0) ?: CharStyle.DEFAULT
+    /**
+     * The style new text takes at [offset]: whatever the character before it has,
+     * except that a formula carries over only from strictly within it, which is
+     * the same reach over which the caret shows its source. Its closing edge
+     * belongs to whatever comes next, so typing on past an equation writes beside
+     * it; that boundary has to match the one reveal uses, or text would land
+     * inside a formula that is not showing what it is doing with it. An empty
+     * heading has nothing to copy, so it types as a heading's own text.
+     */
+    private fun styleForInsert(para: Paragraph, offset: Int): CharStyle {
+        val base = styleOfCharAt(para, if (offset > 0) offset - 1 else 0)
+            ?: if (para.headingLevel > 0) Paragraph.HEADING_STYLE else CharStyle.DEFAULT
+        if (!base.math) return base
+        var seen = 0
+        for (run in para.runs) {
+            val end = seen + run.text.length
+            if (run.style.math && offset > seen && offset < end) return base
+            seen = end
+        }
+        return base.copy(math = false)
+    }
 
     private fun styleOfCharAt(para: Paragraph, index: Int): CharStyle? {
         var seen = 0
@@ -244,9 +277,18 @@ class FlowEditor(private val flow: TextFlow) {
         normalize(para)
     }
 
-    /** Merge adjacent equal-style runs and drop empties (an empty paragraph keeps zero runs). */
-    private fun normalize(para: Paragraph) {
+    /**
+     * Merge adjacent equal-style runs and drop empties (an empty paragraph keeps zero runs).
+     * A heading's level sizes its text, so text sized by hand makes it body text, the
+     * rest of it keeping the size it showed.
+     */
+    internal fun normalize(para: Paragraph) {
         para.runs.removeAll { it.text.isEmpty() }
+        if (para.headingLevel > 0 && para.runs.any { it.style.sizePt != null }) {
+            val size = para.textSizePt(flow)
+            for (run in para.runs) if (run.style.sizePt == null) run.style = run.style.copy(sizePt = size)
+            para.headingLevel = 0
+        }
         var i = 0
         while (i < para.runs.size - 1) {
             val a = para.runs[i]
@@ -288,7 +330,7 @@ class FlowEditor(private val flow: TextFlow) {
         normalize(para)
     }
 
-    private fun copyRunsBefore(para: Paragraph, offset: Int): MutableList<Run> {
+    internal fun copyRunsBefore(para: Paragraph, offset: Int): MutableList<Run> {
         val out = mutableListOf<Run>()
         var seen = 0
         for (run in para.runs) {
@@ -302,7 +344,7 @@ class FlowEditor(private val flow: TextFlow) {
         return out
     }
 
-    private fun copyRunsAfter(para: Paragraph, offset: Int): MutableList<Run> {
+    internal fun copyRunsAfter(para: Paragraph, offset: Int): MutableList<Run> {
         val out = mutableListOf<Run>()
         var seen = 0
         for (run in para.runs) {

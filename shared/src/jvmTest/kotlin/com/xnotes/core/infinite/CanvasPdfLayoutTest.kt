@@ -7,7 +7,7 @@ import com.xnotes.core.model.Rgba
 import com.xnotes.core.model.ShapeItem
 import com.xnotes.core.model.Stroke
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolDefaults
 import org.junit.Assert.assertEquals

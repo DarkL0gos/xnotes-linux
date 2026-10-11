@@ -14,3 +14,19 @@ fun roundHalfUp(x: Double): Long = if (x.isNaN()) 0L else x.roundToLong()
  * carry doubles in this form, so every platform must produce the same text.
  */
 expect fun javaDoubleToString(v: Double): String
+
+/**
+ * [v] with exactly [places] fraction digits and a '.' whatever the locale, as
+ * `String.format(Locale.ROOT, "%.Nf", v)` writes it (ties rounding away from zero).
+ */
+fun fixedDecimal(v: Double, places: Int): String {
+    if (v.isNaN()) return "NaN"
+    if (v.isInfinite()) return if (v > 0) "Infinity" else "-Infinity"
+    var scale = 1L
+    repeat(places) { scale *= 10 }
+    val n = roundHalfUp(kotlin.math.abs(v) * scale)
+    val digits = n.toString().padStart(places + 1, '0')
+    val whole = digits.dropLast(places)
+    val frac = digits.takeLast(places)
+    return (if (v < 0) "-" else "") + whole + (if (places > 0) ".$frac" else "")
+}

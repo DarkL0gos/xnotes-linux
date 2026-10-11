@@ -1,26 +1,40 @@
 package com.xnotes.format
 
 import com.xnotes.core.FakeImageCodec
+import com.xnotes.core.FakeTextMeasurer
+import com.xnotes.core.geometry.Affine
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.infinite.CanvasBackground
 import com.xnotes.core.infinite.InfiniteDocument
 import com.xnotes.core.infinite.Waypoint
+import com.xnotes.core.model.ConnectorEnd
+import com.xnotes.core.model.ConnectorItem
 import com.xnotes.core.model.ImageData
 import com.xnotes.core.model.ImageItem
 import com.xnotes.core.model.PagePattern
 import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.Routing
 import com.xnotes.core.model.ShapeItem
+import com.xnotes.core.pal.FontFace
+import com.xnotes.core.model.TextStyle
+import com.xnotes.core.model.ShapeLabel
 import com.xnotes.core.model.Stroke
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.Axis
+import com.xnotes.core.shapes.Elbow
+import com.xnotes.core.shapes.FreePath
+import com.xnotes.core.shapes.Head
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.tools.ToolDefaults
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,7 +48,7 @@ import java.util.zip.ZipOutputStream
 
 class CanvasCodecTest {
 
-    private val codec = CanvasCodec(FakeImageCodec())
+    private val codec = CanvasCodec(FakeImageCodec(), FakeTextMeasurer())
 
     private fun imageFile(bytes: ByteArray = byteArrayOf(1, 2, 3, 4)): File =
         File.createTempFile("img", null).apply { writeBytes(bytes); deleteOnExit() }
@@ -188,6 +202,37 @@ class CanvasCodecTest {
         assertTrue(back[3].locked)
     }
 
+    @Test fun aShapesLabelRoundTripsOnTheCanvas() {
+        val doc = InfiniteDocument()
+        val box = ShapeItem(ShapeKind.DIAMOND, Pt(0.0, 0.0), Pt(90.0, 60.0), Rgba(4, 5, 6, 255), 2.0)
+        box.label = ShapeLabel("Yes?", TextStyle(Rgba(4, 5, 6, 200), 22.0, FontFace.HAND), FakeTextMeasurer())
+        doc.add(box)
+        doc.add(ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(9.0, 9.0), Rgba(1, 2, 3, 255)))
+        val back = roundTrip(doc).items.map { it as ShapeItem }
+        assertEquals("Yes?", back[0].label!!.text)
+        assertEquals(TextStyle(Rgba(4, 5, 6, 200), 22.0, FontFace.HAND), back[0].label!!.style)
+        assertEquals(null, back[1].label)
+        assertEquals(1, Regex("\"label\"").findAll(manifestText(doc)).count())
+    }
+
+    @Test fun drawnTextRoundTripsUnderAKindOlderReadersSkip() {
+        val doc = InfiniteDocument()
+        val box = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(200.0, 100.0), Rgba(4, 5, 6, 255), 2.0, rotation = 0.3)
+        box.label = ShapeLabel("ab", TextStyle(Rgba(4, 5, 6, 255), 10.0, FontFace.SANS), FakeTextMeasurer())
+        val drawn = box.labelAsGlyphs()!!
+        doc.add(drawn)
+        val manifest = manifestText(doc)
+        assertTrue(manifest.contains("\"kind\":\"glyphs\""))
+        assertFalse("no point list for an older reader", manifest.contains("\"points\""))
+        val back = roundTrip(doc).items.single() as ShapeItem
+        assertEquals(ShapeKind.GLYPHS, back.shape)
+        assertEquals(drawn.rotation, back.rotation, 1e-12)
+        val want = drawn.paths().flatMap { it.contours }.flatMap { FreePath.vertices(it) }
+        val got = back.paths().flatMap { it.contours }.flatMap { FreePath.vertices(it) }
+        assertEquals(want.size, got.size)
+        for ((w, g) in want.zip(got)) assertEquals(0.0, w.distanceTo(g), 1e-3)
+    }
+
     @Test fun loadedItemsAreIndexedAndOrdered() {
         val doc = InfiniteDocument()
         val far = ShapeItem(ShapeKind.RECTANGLE, Pt(9000.0, 9000.0), Pt(9100.0, 9100.0), Rgba(1, 1, 1, 255))
@@ -250,13 +295,13 @@ class CanvasCodecTest {
 
     @Test fun everyShapeKindRoundTrips() {
         val doc = InfiniteDocument()
-        for (k in ShapeKind.entries) {
+        for (k in ShapeKind.all) {
             if (k == ShapeKind.POLYGON || k == ShapeKind.POLYLINE) continue
             doc.add(ShapeItem(k, Pt(0.0, 0.0), Pt(30.0, 20.0), Rgba(9, 9, 9, 255), 2.0))
         }
         val back = roundTrip(doc)
         assertEquals(
-            ShapeKind.entries.filter { it != ShapeKind.POLYGON && it != ShapeKind.POLYLINE },
+            ShapeKind.all.filter { it != ShapeKind.POLYGON && it != ShapeKind.POLYLINE },
             back.items.map { (it as ShapeItem).shape },
         )
     }
@@ -485,7 +530,7 @@ class CanvasCodecTest {
         )
         val s = doc.items[0] as Stroke
         assertTrue(s.config.taperEnabled)
-        assertEquals(ToolDefaults.DEFAULT_TAPER_TIP, s.config.taperMinFactor, 1e-9)
+        assertEquals(ToolDefaults.LEGACY_TAPER_TIP, s.config.taperMinFactor, 1e-9)
     }
 
     @Test fun legacyHighlightersReloadAtTheHistoricalAlpha() {
@@ -521,4 +566,374 @@ class CanvasCodecTest {
             codec.write(doc, ByteArrayOutputStream()) { true }
         }
     }
+
+    // --- turned shapes ---
+
+    private val ink = Rgba(1, 2, 3, 255)
+
+    private fun turned(kind: ShapeKind, angle: Double = 0.5) =
+        ShapeItem(kind, Pt(10.0, 20.0), Pt(110.0, 120.0), ink, 2.0).apply {
+            applyTransform(Affine.rotateAbout(box.center, angle))
+        }
+
+    private fun outline(s: ShapeItem): List<Pt> =
+        s.paths().first().contours.first().let { c -> listOf(c.start) + c.segments.map { it.end } }
+
+    private fun assertSameCorners(want: List<Pt>, got: List<Pt>) {
+        assertEquals(want.size, got.size)
+        for (w in want) assertTrue("missing $w", got.any { it.distanceTo(w) < 1e-6 })
+    }
+
+    private fun withoutNewFields(manifest: String) =
+        manifest.replace(Regex(",\"geom\":\"[a-z0-9_]+\""), "")
+            .replace(Regex(",\"rect\":\\[[^\\]]*\\],\"angle\":[-0-9.eE]+"), "")
+
+    @Test fun aTurnedShapeRoundTripsAsItself() {
+        for (kind in listOf(ShapeKind.RECTANGLE, ShapeKind.ELLIPSE, ShapeKind.CIRCLE, ShapeKind.TRIANGLE)) {
+            val doc = InfiniteDocument()
+            val s = turned(kind)
+            doc.add(s)
+            val back = roundTrip(doc).items[0] as ShapeItem
+            assertEquals(kind, back.shape)
+            assertEquals(s.rotation, back.rotation, 1e-12)
+            assertEquals(s.box.x, back.box.x, 1e-9)
+            assertEquals(s.box.w, back.box.w, 1e-9)
+            assertNull(back.path)
+        }
+    }
+
+    @Test fun anOlderReaderDrawsATurnedShapesStandIn() {
+        val doc = InfiniteDocument()
+        val s = turned(ShapeKind.RECTANGLE)
+        doc.add(s)
+        val text = manifestText(doc)
+        assertTrue(text.contains("\"shape\":\"polygon\""))
+        assertTrue(text.contains("\"geom\":\"rectangle\""))
+        val legacy = withoutNewFields(text)
+        assertFalse(legacy.contains("\"angle\""))
+        assertSameCorners(outline(s), outline(readManifest(legacy).items[0] as ShapeItem))
+    }
+
+    @Test fun aTurnedEllipsesStandInLiesOnTheEllipse() {
+        val doc = InfiniteDocument()
+        val s = turned(ShapeKind.ELLIPSE, 0.3).also { it.applyTransform(Affine.scaleAlongAxes(it.box.center, 0.3, 1.0, 0.5)) }
+        doc.add(s)
+        val back = readManifest(withoutNewFields(manifestText(doc))).items[0] as ShapeItem
+        assertEquals(ShapeKind.POLYGON, back.shape)
+        val rx = s.box.w / 2.0
+        val ry = s.box.h / 2.0
+        for (v in back.vertices()!!) {
+            val q = s.toLocal(v)
+            val e = ((q.x - s.box.centerX) / rx).let { it * it } + ((q.y - s.box.centerY) / ry).let { it * it }
+            assertEquals(1.0, e, 1e-9)
+        }
+    }
+
+    @Test fun anUprightShapeWritesNothingNew() {
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(50.0, 30.0), ink, 2.0))
+        doc.add(ShapeItem.poly(ShapeKind.POLYGON, listOf(Pt(0.0, 0.0), Pt(9.0, 1.0), Pt(4.0, 7.0)), ink))
+        val text = manifestText(doc)
+        assertFalse(text, text.contains("\"geom\""))
+        assertFalse(text, text.contains("\"angle\""))
+        assertFalse(text, text.contains("\"rect\""))
+    }
+
+    @Test fun aTurnedPolygonKeepsItsFrame() {
+        val verts = listOf(Pt(0.0, 0.0), Pt(80.0, 10.0), Pt(60.0, 70.0), Pt(-10.0, 40.0))
+        val s = ShapeItem.poly(ShapeKind.POLYGON, verts, ink).apply {
+            applyTransform(Affine.rotateAbout(Pt(20.0, 20.0), 0.7))
+        }
+        val doc = InfiniteDocument()
+        doc.add(s)
+        assertFalse(manifestText(doc).contains("geom"))
+        val back = roundTrip(doc).items[0] as ShapeItem
+        assertEquals(ShapeKind.POLYGON, back.shape)
+        assertEquals(0.7, back.rotation, 1e-12)
+        val want = s.vertices()!!
+        val got = back.vertices()!!
+        for (i in want.indices) assertEquals(0.0, want[i].distanceTo(got[i]), 1e-9)
+    }
+
+    @Test fun anOldBakedRectangleComesBackAsARectangle() {
+        // What earlier versions saved for a turned rectangle: a polygon of its four corners.
+        val turn = Affine.rotateAbout(Pt(50.0, 25.0), 0.6)
+        val corners = listOf(Pt(0.0, 0.0), Pt(100.0, 0.0), Pt(100.0, 50.0), Pt(0.0, 50.0)).map(turn::apply)
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem.poly(ShapeKind.POLYGON, corners, ink))
+        val back = roundTrip(doc).items[0] as ShapeItem
+        assertEquals(ShapeKind.RECTANGLE, back.shape)
+        assertEquals(0.6, back.rotation, 1e-9)
+        assertEquals(100.0, back.box.w, 1e-9)
+        assertEquals(50.0, back.box.h, 1e-9)
+        assertSameCorners(corners, outline(back))
+    }
+
+    @Test fun anOldBakedEllipseComesBackAsAnEllipse() {
+        val turn = Affine.rotateAbout(Pt(50.0, 25.0), 0.6)
+        val ellipse = ShapeItem(ShapeKind.ELLIPSE, Pt(0.0, 0.0), Pt(100.0, 50.0), ink, 2.0)
+        val circle = ShapeItem(ShapeKind.CIRCLE, Pt(0.0, 0.0), Pt(50.0, 50.0), ink, 2.0)
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem.poly(ShapeKind.POLYGON, ellipse.ellipsePolygon().map(turn::apply), ink))
+        doc.add(ShapeItem.poly(ShapeKind.POLYGON, circle.ellipsePolygon().map(turn::apply), ink))
+        val back = roundTrip(doc).items.map { it as ShapeItem }
+        assertEquals(ShapeKind.ELLIPSE, back[0].shape)
+        assertEquals(0.6, back[0].rotation, 1e-9)
+        assertEquals(100.0, back[0].box.w, 1e-6)
+        assertEquals(50.0, back[0].box.h, 1e-6)
+        assertEquals(ShapeKind.CIRCLE, back[1].shape)
+    }
+
+    @Test fun aQuadThatIsNotQuiteARectangleStaysAPolygon() {
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem.poly(ShapeKind.POLYGON, listOf(Pt(0.0, 0.0), Pt(100.0, 0.0), Pt(100.0, 50.0), Pt(0.0, 50.5)), ink))
+        assertEquals(ShapeKind.POLYGON, (roundTrip(doc).items[0] as ShapeItem).shape)
+    }
+
+    @Test fun anUnknownGeomFallsBackToTheStandIn() {
+        val doc = InfiniteDocument()
+        val s = turned(ShapeKind.TRIANGLE)
+        doc.add(s)
+        val text = manifestText(doc).replace("\"geom\":\"triangle\"", "\"geom\":\"hexagram\"")
+        val back = readManifest(text).items[0] as ShapeItem
+        assertEquals(ShapeKind.POLYGON, back.shape)
+        assertSameCorners(outline(s), outline(back))
+    }
+
+    // --- free outlines ---
+
+    @Test fun aCurveRoundTripsAsItsCubic() {
+        val controls = listOf(Pt(0.0, 0.0), Pt(30.0, 120.0), Pt(140.0, 110.0), Pt(160.0, 10.0))
+        val curve = ShapeItem.free(
+            ShapeKind.CURVE,
+            listOf(com.xnotes.core.vector.VectorContour(controls[0], listOf(com.xnotes.core.vector.VectorSeg.Cubic(controls[1], controls[2], controls[3])), false)),
+            ink, 2.0,
+        )
+        val doc = InfiniteDocument()
+        doc.add(curve)
+        val text = manifestText(doc)
+        assertTrue(text.contains("\"shape\":\"curve\""))
+        assertTrue(text.contains("\"path\":\"M"))
+        val back = roundTrip(doc).items[0] as ShapeItem
+        assertEquals(ShapeKind.CURVE, back.shape)
+        val seg = back.paths().single().contours.single().segments.single() as com.xnotes.core.vector.VectorSeg.Cubic
+        assertEquals(0.0, seg.c1.distanceTo(controls[1]), 1e-3)
+        assertEquals(0.0, seg.end.distanceTo(controls[3]), 1e-3)
+        // An older reader sees a polyline through the curve.
+        val legacy = readManifest(text.replace(Regex(",\"rect\":\\[[^\\]]*\\]"), "").replace(Regex(",\"path\":\"[^\"]*\""), ""))
+        val pts = (legacy.items[0] as ShapeItem).vertices()!!
+        assertTrue(pts.size > 8)
+        assertEquals(0.0, pts.last().distanceTo(controls[3]), 1e-6)
+    }
+
+    @Test fun oldFreeShapesWriteBackByteForByte() {
+        val item = "{\"kind\":\"shape\",\"shape\":\"curve\",\"start\":[0,0],\"end\":[30,20]," +
+            "\"stroke_rgba\":[9,9,9,255],\"stroke_width\":2,\"fill_rgba\":null," +
+            "\"points\":[[0,0],[10,15],[20,20],[30,5]]}," +
+            "{\"kind\":\"shape\",\"shape\":\"polygon\",\"start\":[0,0],\"end\":[9,7]," +
+            "\"stroke_rgba\":[1,2,3,255],\"stroke_width\":3,\"fill_rgba\":[1,2,3,64]," +
+            "\"points\":[[0,0],[9,1],[4,7]]}"
+        val manifest = "{\"format\":\"xcanvas\",\"version\":1,\"dpi\":150,\"items\":[$item]}"
+        val again = manifestText(readManifest(manifest))
+        assertTrue(again, again.contains("\"items\":[$item]"))
+    }
+
+    @Test fun aTrianglesKnobRoundTripsBehindAStandIn() {
+        val t = ShapeItem(ShapeKind.TRIANGLE, Pt(0.0, 0.0), Pt(100.0, 60.0), ink, 2.0)
+        t.dragKnob(0, Pt(20.0, 0.0))
+        val doc = InfiniteDocument()
+        doc.add(t)
+        val text = manifestText(doc)
+        assertTrue(text, text.contains("\"shape\":\"polygon\""))
+        assertTrue(text, text.contains("\"adj\":[0.2]"))
+        val back = roundTrip(doc).items[0] as ShapeItem
+        assertEquals(ShapeKind.TRIANGLE, back.shape)
+        assertEquals(0.2, back.adj[0], 1e-12)
+        assertNull(back.path)
+    }
+
+    @Test fun headsRoundTripAndAPlainArrowWritesNone() {
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem(ShapeKind.ARROW, Pt(0.0, 0.0), Pt(50.0, 0.0), ink, 2.0))
+        doc.add(ShapeItem(ShapeKind.LINE, Pt(0.0, 10.0), Pt(50.0, 10.0), ink, 2.0, headStart = com.xnotes.core.shapes.Head.FILLED_DIAMOND, headEnd = com.xnotes.core.shapes.Head.HOLLOW_TRIANGLE))
+        val text = manifestText(doc)
+        assertEquals(1, Regex("\"head_start\"").findAll(text).count())
+        val back = roundTrip(doc).items.map { it as ShapeItem }
+        assertEquals(com.xnotes.core.shapes.Head.OPEN, back[0].headEnd)
+        assertEquals(com.xnotes.core.shapes.Head.FILLED_DIAMOND, back[1].headStart)
+        assertEquals(com.xnotes.core.shapes.Head.HOLLOW_TRIANGLE, back[1].headEnd)
+    }
+
+    @Test fun everyBasicKindRoundTripsBehindAStandIn() {
+        // Drawn text goes under a kind of its own, which older readers skip (its own test).
+        val kinds = ShapeKind.all.filter { !it.isLegacy && it != ShapeKind.GLYPHS }
+        val doc = InfiniteDocument()
+        for (k in kinds) {
+            val s = ShapeItem(k, Pt(0.0, 0.0), Pt(120.0, 80.0), ink, 2.0, n = if (k.nRange != null) 7 else k.defaultN)
+            k.knobs.firstOrNull()?.let { s.dragKnob(0, Pt(30.0, 10.0)) }
+            doc.add(s)
+        }
+        val text = manifestText(doc)
+        val back = roundTrip(doc).items.map { it as ShapeItem }
+        for ((i, k) in kinds.withIndex()) {
+            val want = doc.items[i] as ShapeItem
+            assertEquals(k, back[i].shape)
+            assertEquals("$k count", want.n, back[i].n)
+            assertTrue("$k knobs", want.adj.contentEquals(back[i].adj))
+        }
+        // Older readers see each as the polygon or polyline it looks like, never a stray rectangle.
+        val legacy = readManifest(withoutNewFields(text).replace(Regex(",\"adj\":\\[[^\\]]*\\]"), "").replace(Regex(",\"n\":[0-9]+"), ""))
+        for (item in legacy.items.map { it as ShapeItem }) {
+            val ok = item.shape == ShapeKind.POLYGON || item.shape == ShapeKind.POLYLINE || (item.shape == ShapeKind.RECTANGLE && item.vertices() == null)
+            assertTrue("an older reader would see ${item.shape} with ${item.vertices()?.size} points", ok)
+        }
+    }
+
+    // --- connectors ---
+
+    private fun gluedPair(): Triple<ShapeItem, ShapeItem, ConnectorItem> {
+        val a = ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(100.0, 60.0), ink, 2.0)
+        val b = ShapeItem(ShapeKind.ELLIPSE, Pt(300.0, 200.0), Pt(400.0, 260.0), ink, 2.0)
+        val c = ConnectorItem(Routing.ELBOW, ConnectorEnd(Pt(100.0, 30.0), a, 5), ConnectorEnd(Pt(300.0, 230.0), b, 2), ink, 2.0, headEnd = Head.FILLED)
+        c.elbow = Elbow(Axis.H, doubleArrayOf(200.0))
+        return Triple(a, b, c)
+    }
+
+    /** [manifest] without its connector objects, as a reader that predates them sees it. */
+    private fun withoutConnectors(manifest: String): String {
+        var s = manifest
+        while (true) {
+            val at = s.indexOf(",\"connector\":{")
+            if (at < 0) return s
+            var depth = 0
+            var i = s.indexOf('{', at)
+            while (true) {
+                if (s[i] == '{') depth++
+                if (s[i] == '}' && --depth == 0) break
+                i++
+            }
+            s = s.removeRange(at, i + 1)
+        }
+    }
+
+    @Test fun aConnectorRoundTripsGluedToWhatItJoins() {
+        val (a, b, c) = gluedPair()
+        c.label = ShapeLabel("yes", TextStyle(ink, 12.0, FontFace.SANS), FakeTextMeasurer())
+        c.labelAt = 0.3
+        c.dashed = true
+        val doc = InfiniteDocument()
+        doc.add(a)
+        doc.add(c)
+        doc.add(b)
+        val back = roundTrip(doc).items
+        val bc = back[1] as ConnectorItem
+        assertEquals(Routing.ELBOW, bc.routing)
+        assertSame(back[0], bc.start.target)
+        assertEquals(5, bc.start.point)
+        assertSame(back[2], bc.end.target)
+        assertEquals(2, bc.end.point)
+        assertEquals(c.elbow, bc.elbow)
+        assertEquals(c.start.at, bc.start.at)
+        assertEquals(c.end.at, bc.end.at)
+        assertEquals(Head.FILLED, bc.headEnd)
+        assertEquals(Head.NONE, bc.headStart)
+        assertTrue(bc.dashed)
+        assertEquals("yes", bc.label!!.text)
+        assertEquals(0.3, bc.labelAt, 0.0)
+    }
+
+    @Test fun onlyWhatAConnectorGluesToGetsAnId() {
+        val (a, b, c) = gluedPair()
+        val doc = InfiniteDocument()
+        doc.add(ShapeItem(ShapeKind.RECTANGLE, Pt(500.0, 0.0), Pt(600.0, 50.0), ink))
+        doc.add(a)
+        doc.add(b)
+        doc.add(c)
+        val text = manifestText(doc)
+        assertEquals(2, Regex("\"id\":").findAll(text).count())
+        assertTrue(text.contains("\"item\":1") && text.contains("\"item\":2"))
+        assertArrayEquals(bytesOf(doc), bytesOf(doc))
+    }
+
+    @Test fun aReaderThatPredatesConnectorsDrawsTheLineTheyRunAlong() {
+        val (a, b, c) = gluedPair()
+        val doc = InfiniteDocument()
+        doc.add(a)
+        doc.add(b)
+        doc.add(c)
+        val old = readManifest(withoutConnectors(manifestText(doc))).items[2] as ShapeItem
+        assertEquals(ShapeKind.POLYLINE, old.shape)
+        assertEquals(c.route(), old.vertices())
+        assertEquals(Head.FILLED, old.headEnd)
+    }
+
+    @Test fun anEndGluedToSomethingNoLongerThereIsWrittenLoose() {
+        val (a, _, c) = gluedPair()
+        val doc = InfiniteDocument()
+        doc.add(a)
+        doc.add(c)
+        assertEquals(1, Regex("\"item\":").findAll(manifestText(doc)).count())
+        val back = roundTrip(doc).items
+        val bc = back[1] as ConnectorItem
+        assertSame(back[0], bc.start.target)
+        assertNull(bc.end.target)
+        assertEquals(c.end.at, bc.end.at)
+    }
+
+    @Test fun aStraightConnectorKeepsEvenASingleWaypoint() {
+        val c = ConnectorItem(Routing.STRAIGHT, ConnectorEnd(Pt(0.0, 0.0)), ConnectorEnd(Pt(100.0, 0.0)), ink)
+        c.waypoints = listOf(Pt(50.0, 40.0))
+        val doc = InfiniteDocument()
+        doc.add(c)
+        val back = roundTrip(doc).items.single() as ConnectorItem
+        assertEquals(Routing.STRAIGHT, back.routing)
+        assertEquals(listOf(Pt(50.0, 40.0)), back.waypoints)
+    }
+
+    @Test fun aRoutingFromANewerVersionDrawsAsItsStandIn() {
+        val (_, _, c) = gluedPair()
+        c.start = c.start.loose()
+        c.end = c.end.loose()
+        val doc = InfiniteDocument()
+        doc.add(c)
+        val text = manifestText(doc).replace("\"routing\":\"elbow\"", "\"routing\":\"zigzag\"")
+        val back = readManifest(text).items.single() as ConnectorItem
+        assertEquals(Routing.STRAIGHT, back.routing)
+        assertEquals(c.route(), back.route())
+    }
+
+    @Test fun anIdThatNamesNothingLeavesTheEndLoose() {
+        val (a, b, c) = gluedPair()
+        val doc = InfiniteDocument()
+        doc.add(a)
+        doc.add(b)
+        doc.add(c)
+        val text = manifestText(doc).replace("\"item\":2", "\"item\":9")
+        val bc = readManifest(text).items[2] as ConnectorItem
+        assertNotNull(bc.start.target)
+        assertNull(bc.end.target)
+    }
+
+    @Test fun aConnectorFindsAnImageItGluesToOnceTheImageLoads() {
+        val image = ImageItem(ImageData(imageFile(), 4, 4), Rect(0.0, 0.0, 40.0, 40.0))
+        val c = ConnectorItem(Routing.STRAIGHT, ConnectorEnd(Pt(40.0, 20.0), image, 5), ConnectorEnd(Pt(200.0, 20.0)), ink)
+        val doc = InfiniteDocument()
+        doc.add(c)
+        doc.add(image)
+        val back = roundTrip(doc).items
+        assertTrue(back[1] is ImageItem)
+        assertSame(back[1], (back[0] as ConnectorItem).start.target)
+    }
+
+    @Test fun whereALinesLabelSitsRoundTrips() {
+        val line = ShapeItem(ShapeKind.LINE, Pt(0.0, 0.0), Pt(200.0, 0.0), ink, 2.0)
+        line.label = ShapeLabel("mid", TextStyle(ink, 12.0, FontFace.SANS), FakeTextMeasurer())
+        line.labelAt = 0.2
+        val doc = InfiniteDocument()
+        doc.add(line)
+        val back = roundTrip(doc).items.single() as ShapeItem
+        assertEquals("mid", back.label!!.text)
+        assertEquals(0.2, back.labelAt, 0.0)
+    }
 }
+

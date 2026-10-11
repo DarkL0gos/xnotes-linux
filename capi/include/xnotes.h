@@ -368,11 +368,12 @@ typedef struct xn_text_field {
     double font_px;
     double zoom;
     xn_rgba color;
-    int rotation;          /* view rotation, degrees clockwise about (x, y) */
+    double rotation;       /* degrees clockwise about (x, y): the view's rotation, plus a shape label's turn */
     const uint16_t* face;  /* font family id, as in xn_font */
     int face_len;
     const uint16_t* text;
     int text_len;
+    int centred;           /* v3: every line centred (a shape's label) */
 } xn_text_field;
 
 /* The open field's current geometry (after a scroll or zoom); strings are left NULL. 0 when none. */

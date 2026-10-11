@@ -1,5 +1,9 @@
 package com.xnotes.canvas
 
+import com.xnotes.core.model.resolvedSpacing
+import com.xnotes.core.model.resolvedPatternColor
+import com.xnotes.core.model.PageStyle
+import com.xnotes.core.model.PagePattern
 import com.xnotes.core.geometry.Affine
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
@@ -7,16 +11,15 @@ import com.xnotes.core.model.CanvasItem
 import com.xnotes.core.model.Document
 import com.xnotes.core.model.Page
 import com.xnotes.core.model.PageInsets
-import com.xnotes.core.model.PagePattern
+import com.xnotes.core.model.PageTemplates
 import com.xnotes.core.model.Rgba
 import com.xnotes.core.model.Stroke
+import com.xnotes.core.model.TextMarkup
 import com.xnotes.core.model.insets
 import com.xnotes.core.model.paintMarginPattern
 import com.xnotes.core.model.paintPagePattern
 import com.xnotes.core.model.resolvedPageColor
-import com.xnotes.core.model.resolvedPattern
-import com.xnotes.core.model.resolvedPatternColor
-import com.xnotes.core.model.resolvedSpacing
+import com.xnotes.core.model.resolvedTemplate
 import com.xnotes.core.pal.Pen
 import com.xnotes.core.pal.RasterSurface
 import com.xnotes.core.pal.Renderer
@@ -44,7 +47,10 @@ fun CanvasItem.isHighlighterInk(): Boolean = this is Stroke && this.tool == Tool
  * mismatch — and blitted stretched into the new one meanwhile, like a stale-resolution entry is
  * during a pinch.
  */
-class CacheEntry(val surface: RasterSurface, val res: Double, val cover: Rect = Rect(0.0, 0.0, 0.0, 0.0))
+class CacheEntry(val surface: RasterSurface, val res: Double, val cover: Rect = Rect(0.0, 0.0, 0.0, 0.0)) {
+    /** A background layer's last markup edit held (see [CanvasState.rebakeBackground]). Main thread only. */
+    var seq: Int = 0
+}
 
 /**
  * A cached highlighter ribbon: its opaque bitmap, the resolution + geometry + opaque colour it
@@ -88,6 +94,20 @@ class CanvasState(
     var viewportH: Int = 0
     var renderScale: Double = 1.0
 
+    /**
+     * Viewport px a floating toolbar covers along each edge. The pages still run under it, but the
+     * scroll range and the fits only count the clear area inside, so nothing is stuck beneath it.
+     */
+    var insetLeft: Double = 0.0
+    var insetTop: Double = 0.0
+    var insetRight: Double = 0.0
+    var insetBottom: Double = 0.0
+    val clearW: Double get() = viewportW - insetLeft - insetRight
+    val clearH: Double get() = viewportH - insetTop - insetBottom
+
+    /** The middle of the clear area, where zoom steps anchor. */
+    fun clearCenter(): Pt = Pt(insetLeft + clearW / 2.0, insetTop + clearH / 2.0)
+
     /** User-set zoom limits (preferences); every zoom path clamps into [minZoom]..[maxZoom]. */
     var minZoom: Double = MIN_ZOOM
     var maxZoom: Double = MAX_ZOOM
@@ -126,6 +146,11 @@ class CanvasState(
     /** Gap (content px) between pages — inside a spread, between rows, and between paginated
      *  rows alike — equal to [sideMargin] so spacing always matches the margin preference. */
     val pageGap: Double get() = sideMargin
+
+    /** Margin (content px) above and below the content. Paginated it follows [sideMargin], so a
+     *  0 px preference lets the fit-height magnet fill the viewport; vertical scrolling keeps the
+     *  fixed [MARGIN] that holds the first page clear of the toolbar. */
+    val vertMargin: Double get() = if (verticalScroll) MARGIN else sideMargin
 
     /** How pages group into layout rows (Single / Double / Cover); see [rowRanges]. */
     var viewingMode: ViewingMode = ViewingMode.SINGLE
@@ -289,7 +314,7 @@ class CanvasState(
         return pageAffine(page).compose(local.compose(displayAffine(page)))
     }
 
-    /** While true (during a pinch/zoom drag) caches are blitted stale-scaled
+    /** While true (a pinch that has moved the zoom) caches are blitted stale-scaled
      *  instead of rebuilt every frame; they rebuild at the final resolution when
      *  the gesture ends. */
     var zoomingInProgress: Boolean = false
@@ -326,6 +351,16 @@ class CanvasState(
      * must read only an immutable published layout snapshot, never the live model.
      */
     var paintFlow: ((page: Page, renderer: Renderer, region: Rect) -> Unit)? = null
+
+    /**
+     * Optional painter for the flow's formulas, which [paintFlow] leaves out of every cache:
+     * [CanvasView] paints them over the background each frame, so one that finishes setting
+     * appears without its page being rebuilt. Like [paintFlow] it reads only the published layout.
+     */
+    var paintMath: ((page: Page, renderer: Renderer, region: Rect) -> Unit)? = null
+
+    /** Optional: queue the formulas of a page about to scroll in, to be drawn at [scale] screen px per page px. */
+    var prefetchMath: ((page: Page, scale: Double) -> Unit)? = null
 
     /**
      * True while a flow-text caret session is live: screen ink caches build WITHOUT
@@ -417,6 +452,8 @@ class CanvasState(
         val sy: Double,
         val z: Double,
         val gen: Int,
+        /** The last markup edit its base layer holds, like [CacheEntry.seq]. */
+        val seq: Int,
     )
 
     private var sharpFrame: SharpFrame? = null
@@ -489,7 +526,7 @@ class CanvasState(
         if (pages.isEmpty()) {
             pageRects = emptyList()
             contentW = 2 * sideMargin
-            contentH = 2 * MARGIN
+            contentH = 2 * vertMargin
             currentRow = 0
             return
         }
@@ -502,7 +539,7 @@ class CanvasState(
         if (verticalScroll) {
             // Rows stack top-down, centred against the widest row.
             val maxW = rowWidths.max()
-            var y = MARGIN // vertical top margin (keeps the page below the toolbar)
+            var y = vertMargin // vertical top margin (keeps the page below the toolbar)
             for ((ri, row) in rows.withIndex()) {
                 var x = sideMargin + (maxW - rowWidths[ri]) / 2.0
                 for (i in row) {
@@ -512,7 +549,7 @@ class CanvasState(
                 y += rowHeights[ri] + pageGap
             }
             contentW = maxW + 2 * sideMargin
-            contentH = (y - pageGap) + MARGIN
+            contentH = (y - pageGap) + vertMargin
         } else {
             // Paginated: rows run left-to-right in one strip, each top-aligned below the margin.
             val maxH = rowHeights.max()
@@ -520,13 +557,13 @@ class CanvasState(
             for ((ri, row) in rows.withIndex()) {
                 var rx = x
                 for (i in row) {
-                    rects[i] = Rect(rx, MARGIN + (rowHeights[ri] - displayH(pages[i])) / 2.0, displayW(pages[i]), displayH(pages[i]))
+                    rects[i] = Rect(rx, vertMargin + (rowHeights[ri] - displayH(pages[i])) / 2.0, displayW(pages[i]), displayH(pages[i]))
                     rx += displayW(pages[i]) + pageGap
                 }
                 x += rowWidths[ri] + pageGap
             }
             contentW = (x - pageGap) + sideMargin
-            contentH = maxH + 2 * MARGIN
+            contentH = maxH + 2 * vertMargin
         }
         pageRects = rects.map { it!! }
         currentRow = currentRow.coerceIn(0, rows.lastIndex)
@@ -551,10 +588,10 @@ class CanvasState(
         val rows = rowRanges()
         if (rows.isEmpty()) return Pt(0.0, 0.0)
         val rb = rowBounds(rows[rowIndex.coerceIn(0, rows.lastIndex)])
-        val minX = (rb.left - sideMargin) * zoom
-        val maxX = (rb.right + sideMargin) * zoom - viewportW
+        val minX = (rb.left - sideMargin) * zoom - insetLeft
+        val maxX = (rb.right + sideMargin) * zoom - viewportW + insetRight
         val sx = if (maxX < minX) (minX + maxX) / 2.0 else minX
-        val sy = (rb.top * zoom - TOP_GAP).coerceAtLeast(0.0)
+        val sy = (rb.top * zoom - TOP_GAP - insetTop).coerceAtLeast(-insetTop)
         return Pt(sx, sy)
     }
 
@@ -563,8 +600,8 @@ class CanvasState(
         val rows = rowRanges()
         if (rows.isEmpty()) return false
         val rb = rowBounds(rows[currentRow.coerceIn(0, rows.lastIndex)])
-        val minX = (rb.left - sideMargin) * zoom
-        val maxX = (rb.right + sideMargin) * zoom - viewportW
+        val minX = (rb.left - sideMargin) * zoom - insetLeft
+        val maxX = (rb.right + sideMargin) * zoom - viewportW + insetRight
         if (maxX < minX) return true // the row fits: both edges at once
         return if (next) scrollX >= maxX - 1.0 else scrollX <= minX + 1.0
     }
@@ -577,7 +614,7 @@ class CanvasState(
             currentRow = 0
             return
         }
-        val cx = (scrollX + viewportW / 2.0) / zoom
+        val cx = (scrollX + clearCenter().x) / zoom
         var best = 0
         var bestD = Double.MAX_VALUE
         rows.forEachIndexed { i, row ->
@@ -597,8 +634,8 @@ class CanvasState(
         val ch = contentH * zoom
         // Paginated: the row clamp centres the row when it fits, so the scroll always wins; the
         // whole strip must never be centred (two pages would push each single-page row off centre).
-        val ox = (if (!verticalScroll || cw >= viewportW) -scrollX else (viewportW - cw) / 2.0) - flipOffsetX
-        val oy = (if (ch < viewportH) (viewportH - ch) / 2.0 else -scrollY) - overscrollY
+        val ox = (if (!verticalScroll || cw >= clearW) -scrollX else insetLeft + (clearW - cw) / 2.0) - flipOffsetX
+        val oy = (if (ch < clearH) insetTop + (clearH - ch) / 2.0 else -scrollY) - overscrollY
         return Pt(ox, oy)
     }
 
@@ -615,8 +652,11 @@ class CanvasState(
     fun visibleContentRect(): Rect =
         Rect.fromPoints(viewportToContent(Pt(0.0, 0.0)), viewportToContent(Pt(viewportW.toDouble(), viewportH.toDouble())))
 
-    fun maxScrollX(): Double = max(0.0, ceil(contentW * zoom - viewportW))
-    fun maxScrollY(): Double = max(0.0, ceil(contentH * zoom - viewportH))
+    // A floating bar lets the scroll run past the content's edges by as much as it covers.
+    fun minScrollX(): Double = -insetLeft
+    fun minScrollY(): Double = -insetTop
+    fun maxScrollX(): Double = max(minScrollX(), ceil(contentW * zoom - viewportW + insetRight))
+    fun maxScrollY(): Double = max(minScrollY(), ceil(contentH * zoom - viewportH + insetBottom))
 
     fun clampScroll() {
         if (!verticalScroll && pageRects.isNotEmpty()) {
@@ -627,8 +667,8 @@ class CanvasState(
             scrollY = c.y
             return
         }
-        scrollX = scrollX.coerceIn(0.0, maxScrollX())
-        scrollY = scrollY.coerceIn(0.0, maxScrollY())
+        scrollX = scrollX.coerceIn(minScrollX(), maxScrollX())
+        scrollY = scrollY.coerceIn(minScrollY(), maxScrollY())
     }
 
     /** ([sx], [sy]) clamped into [rowIndex]'s paginated scroll window, without mutating state. */
@@ -636,11 +676,11 @@ class CanvasState(
         val rows = rowRanges()
         if (rows.isEmpty()) return Pt(sx, sy)
         val rb = rowBounds(rows[rowIndex.coerceIn(0, rows.lastIndex)])
-        val minX = (rb.left - sideMargin) * zoom
-        val maxX = (rb.right + sideMargin) * zoom - viewportW
+        val minX = (rb.left - sideMargin) * zoom - insetLeft
+        val maxX = (rb.right + sideMargin) * zoom - viewportW + insetRight
         val cx = if (maxX < minX) (minX + maxX) / 2.0 else sx.coerceIn(minX, maxX)
-        val maxY = ((rb.bottom + MARGIN) * zoom - viewportH).coerceAtLeast(0.0)
-        return Pt(cx, sy.coerceIn(0.0, maxY))
+        val maxY = ((rb.bottom + vertMargin) * zoom - viewportH + insetBottom).coerceAtLeast(-insetTop)
+        return Pt(cx, sy.coerceIn(-insetTop, maxY))
     }
 
     fun scrollBy(dx: Double, dy: Double) {
@@ -656,12 +696,8 @@ class CanvasState(
     /** Resolved paper colour for [page], or null to fall back to the theme paper (see [paperColor]). */
     fun effectivePageColor(page: Page): Rgba? = page.resolvedPageColor(document, pageColorOverride)
 
-    /** Resolved background ruling for [page] (NONE when nothing in the chain sets one). */
-    fun effectivePattern(page: Page): PagePattern = page.resolvedPattern(document)
-
-    fun effectivePatternColor(page: Page): Rgba = page.resolvedPatternColor(document)
-
-    fun effectiveSpacing(page: Page): Double = page.resolvedSpacing(document)
+    /** Resolved page template key for [page] ([PageTemplates.NONE] when nothing in the chain sets one). */
+    fun effectiveTemplate(page: Page): String = page.resolvedTemplate(document)
 
     /**
      * The page's ruling, for a [paintPageBackground] hook (page space, clipped to [region]). A ruling
@@ -669,10 +705,10 @@ class CanvasState(
      * page itself is never drawn over.
      */
     fun paintRuling(page: Page, renderer: Renderer, region: Rect) {
-        val pattern = effectivePattern(page)
-        if (pattern == PagePattern.NONE) return
-        val color = effectivePatternColor(page)
-        val spacing = effectiveSpacing(page)
+        // The built-in templates are the classic rulings; others are drawn by a template painter.
+        val pattern = PagePattern.fromId(effectiveTemplate(page))?.takeIf { it != PagePattern.NONE } ?: return
+        val color = page.resolvedPatternColor(document)
+        val spacing = page.resolvedSpacing(document) ?: PageStyle.DEFAULT_SPACING
         val cover = footprint(page)
         if (page.pdfPage == null) {
             paintPagePattern(renderer, pattern, color, spacing, cover, region)
@@ -705,6 +741,31 @@ class CanvasState(
         return null
     }
 
+    /**
+     * The page under [content], or the nearest shown one (drags cross the gaps between pages),
+     * with the point in its page space clamped to the page.
+     */
+    fun pagePointAt(content: Pt): Pair<Int, Pt>? {
+        var pi = pageIndexAtContent(content)
+        if (pi == null) {
+            val drawable = drawablePageRange()
+            var bestD = Double.MAX_VALUE
+            for (i in pageRects.indices) {
+                if (i !in drawable) continue // never target a hidden paginated neighbour
+                val d = pageRects[i].distanceTo(content)
+                if (d < bestD) {
+                    bestD = d
+                    pi = i
+                }
+            }
+        }
+        val index = pi ?: return null
+        if (pageRects.getOrNull(index) == null) return null
+        val page = document.pages.getOrNull(index) ?: return null
+        val p = toPageSpace(index, content)
+        return index to Pt(p.x.coerceIn(0.0, page.width), p.y.coerceIn(0.0, page.height))
+    }
+
     /** The current page (spec 05 §4): contains the viewport vertical centre, biased by half a gap.
      *  Paginated mode reads it from [currentRow] instead (the page under the viewport centre). */
     fun currentPageIndex(): Int {
@@ -733,8 +794,8 @@ class CanvasState(
      */
     fun isDocumentEndVisible(): Boolean {
         if (pageRects.isEmpty()) return false
-        // The last row's lowest edge is contentH - MARGIN whatever the viewing mode.
-        return contentToViewport(Pt(0.0, contentH - MARGIN)).y <= viewportH + 1.0
+        // The last row's lowest edge is contentH - vertMargin whatever the viewing mode.
+        return contentToViewport(Pt(0.0, contentH - vertMargin)).y <= viewportH - insetBottom + 1.0
     }
 
     /** The first page of the row after the one containing [from] (page-nav stepping). */
@@ -762,8 +823,8 @@ class CanvasState(
         val centerX = (row.minOf { pageRects[it].left } + row.maxOf { pageRects[it].right }) / 2.0
         // Scroll so the page top clears the toolbar with a small gap, so no part of the
         // page is hidden behind the chrome.
-        scrollY = (top * zoom - TOP_GAP).coerceAtLeast(0.0)
-        scrollX = centerX * zoom - viewportW / 2.0
+        scrollY = (top * zoom - TOP_GAP - insetTop).coerceAtLeast(-insetTop)
+        scrollX = centerX * zoom - clearCenter().x
         clampScroll()
     }
 
@@ -785,7 +846,7 @@ class CanvasState(
 
     fun zoomByStep(zoomIn: Boolean) {
         val factor = if (zoomIn) ZOOM_STEP else 1.0 / ZOOM_STEP
-        setZoomAnchored(Pt(viewportW / 2.0, viewportH / 2.0), zoom * factor)
+        setZoomAnchored(clearCenter(), zoom * factor)
     }
 
     /** Pull the live zoom back inside [minZoom]..[maxZoom] after the limits changed, anchored at
@@ -797,7 +858,7 @@ class CanvasState(
             zoom = z // not laid out yet; the initial view will place the scroll
             return
         }
-        val focus = Pt(viewportW / 2.0, viewportH / 2.0)
+        val focus = clearCenter()
         val anchor = viewportToContent(focus)
         zoom = z
         fitWidthActive = false
@@ -822,9 +883,10 @@ class CanvasState(
         val pages = document.pages
         if (zoomLocked || pages.isEmpty() || viewportH == 0) return
         val cur = currentPageIndex()
-        zoom = ((viewportH - 60.0) / displayH(pages[cur])).coerceIn(minZoom, maxZoom)
+        val magnet = fitHeightZoom() // paginated: land exactly where a pinch's height magnet does
+        zoom = if (magnet > 0.0) magnet else ((clearH - 60.0) / displayH(pages[cur])).coerceIn(minZoom, maxZoom)
         fitWidthActive = false
-        fitHeightActive = false
+        fitHeightActive = magnet > 0.0
         invalidateCachesForZoom()
         goToPage(cur)
     }
@@ -834,7 +896,10 @@ class CanvasState(
         if (zoomLocked || pages.isEmpty() || viewportW == 0 || viewportH == 0) return
         val cur = currentPageIndex()
         val page = pages[cur]
-        zoom = min((viewportW - 60.0) / displayW(page), (viewportH - 60.0) / displayH(page)).coerceIn(minZoom, maxZoom)
+        val w = displayW(page) + 2 * sideMargin
+        val h = displayH(page) + 2 * vertMargin
+        if (w <= 0.0 || h <= 0.0) return
+        zoom = min(clearW / w, clearH / h).coerceIn(minZoom, maxZoom)
         fitWidthActive = false
         fitHeightActive = false
         invalidateCachesForZoom()
@@ -851,10 +916,10 @@ class CanvasState(
             val rows = rowRanges()
             if (rows.isEmpty()) return 0.0
             val w = rowBounds(rows[currentRow.coerceIn(0, rows.lastIndex)]).w + 2 * sideMargin
-            return if (w <= 0.0) 0.0 else (viewportW / w).coerceIn(minZoom, maxZoom)
+            return if (w <= 0.0) 0.0 else (clearW / w).coerceIn(minZoom, maxZoom)
         }
         if (contentW <= 0.0) return 0.0
-        return (viewportW / contentW).coerceIn(minZoom, maxZoom)
+        return (clearW / contentW).coerceIn(minZoom, maxZoom)
     }
 
     /** The zoom at which the current paginated row (plus the vertical margins) exactly fills
@@ -863,8 +928,8 @@ class CanvasState(
         if (verticalScroll || viewportH == 0) return 0.0
         val rows = rowRanges()
         if (rows.isEmpty()) return 0.0
-        val h = rowBounds(rows[currentRow.coerceIn(0, rows.lastIndex)]).h + 2 * MARGIN
-        return if (h <= 0.0) 0.0 else (viewportH / h).coerceIn(minZoom, maxZoom)
+        val h = rowBounds(rows[currentRow.coerceIn(0, rows.lastIndex)]).h + 2 * vertMargin
+        return if (h <= 0.0) 0.0 else (clearH / h).coerceIn(minZoom, maxZoom)
     }
 
     /**
@@ -908,10 +973,11 @@ class CanvasState(
         if (!fitWidthActive) return
         // Keep the content under the viewport's vertical centre put (don't jump to the page top) and
         // re-centre horizontally; only the width-driven zoom changes.
-        val centerContentY = viewportToContent(Pt(viewportW / 2.0, viewportH / 2.0)).y
+        val center = clearCenter()
+        val centerContentY = viewportToContent(center).y
         zoom = fitWidthZoom()
-        scrollX = 0.0
-        scrollY = centerContentY * zoom - viewportH / 2.0
+        scrollX = minScrollX()
+        scrollY = centerContentY * zoom - center.y
         invalidateCachesForZoom()
         clampScroll()
     }
@@ -1107,12 +1173,13 @@ class CanvasState(
     }
 
     /**
-     * Whether [page] has anything in its background layer — a PDF page or a resolved ruling.
+     * Whether [page] has anything in its background layer — a PDF page, a resolved ruling or markups.
      * Plain colour pages return false so no (large, transparent) background surface is allocated,
      * even though [paintPageBackground] is always installed for the pattern path.
      */
     fun hasPageBackground(page: Page): Boolean =
-        paintPageBackground != null && (page.pdfPage != null || effectivePattern(page) != PagePattern.NONE)
+        paintPageBackground != null &&
+            (page.pdfPage != null || effectiveTemplate(page) != PageTemplates.NONE || page.markups.isNotEmpty())
 
     /**
      * The page's rendered background layer (PDF/template) at the current resolution,
@@ -1125,7 +1192,7 @@ class CanvasState(
         val res = clampedRes(page)
         val existing = bgCaches[page]
         if (existing != null && existing.usableFor(page, res)) return existing
-        return buildBackground(page, res).also { bgCaches[page] = it }
+        return buildBackground(page, res).also { it.seq = markupSeq; bgCaches[page] = it }
     }
 
     /** Non-blocking counterpart to [backgroundFor]; see [cacheForOrSchedule]. */
@@ -1141,11 +1208,12 @@ class CanvasState(
     private fun scheduleBg(page: Page, res: Double) {
         if (!pendingBg.add(page)) return
         val gen = cacheGen
+        val seq = markupSeq // the build reads the markups after this, so it holds every edit up to here
         runAsync {
             val entry = buildBackground(page, res)
             postToMain {
                 pendingBg.remove(page)
-                if (gen == cacheGen) bgCaches[page] = entry
+                if (gen == cacheGen) bgCaches[page] = entry.also { it.seq = seq }
                 onCacheReady?.invoke() // discarded or not; see [scheduleInk]
             }
         }
@@ -1162,6 +1230,70 @@ class CanvasState(
         r.translate(-cover.left, -cover.top)
         paintPageBackground?.invoke(page, r, res, cover)
         return CacheEntry(surface, res, cover)
+    }
+
+    /** Markup edits made so far; each background layer and sharp frame records the last one it holds. */
+    private var markupSeq = 0
+
+    private class Unbaked(val seq: Int, val markup: TextMarkup)
+
+    /** Markups an edit put on a page that a layer on screen may not hold yet, by page. Main thread only. */
+    private val unbaked = HashMap<Page, MutableList<Unbaked>>()
+
+    /** Pages whose background is being painted afresh for a markup edit, and those edited again meanwhile. */
+    private val rebaking = HashSet<Page>()
+    private val rebakeAgain = HashSet<Page>()
+
+    /** A markup edit came in while a sharp render was under way, which may have read the page before it. */
+    private var sharpAgain = false
+
+    /**
+     * [page]'s markups changed: its background layer is painted afresh on the cache thread and
+     * swapped in once done, the old one shown meanwhile, and the sharp viewport likewise. Patching
+     * just the region they cover would leave seams: PDFium draws a region's pixels visibly
+     * differently from the same pixels of a whole page, around glyphs and images near its edges.
+     * [added] are the markups the edit put on; [unbakedMarkups] hands them to the overlay until the
+     * layers on screen hold them, so nothing blinks while the new layer renders.
+     */
+    fun rebakeBackground(page: Page, added: List<TextMarkup>) {
+        val seq = ++markupSeq
+        if (added.isNotEmpty()) unbaked.getOrPut(page) { ArrayList() }.addAll(added.map { Unbaked(seq, it) })
+        // A whole-layer build under way may have read the markups before the edit.
+        cacheGen++
+        if (pendingSharp) sharpAgain = true else if (sharpFrame?.gen == sharpGen) requestSharpViewport()
+        val entry = bgCaches[page] ?: return
+        if (entry.usableFor(page, clampedRes(page))) scheduleRebake(page) // else the draw loop builds it anew
+    }
+
+    private fun scheduleRebake(page: Page) {
+        if (!rebaking.add(page)) {
+            rebakeAgain += page
+            return
+        }
+        val res = clampedRes(page)
+        val seq = markupSeq // the build reads the markups after this, so it holds every edit up to here
+        runAsync {
+            val fresh = buildBackground(page, res)
+            postToMain {
+                rebaking.remove(page)
+                val shown = bgCaches[page]
+                if (shown != null && shown.seq < seq) bgCaches[page] = fresh.also { it.seq = seq }
+                if (rebakeAgain.remove(page) && bgCaches[page] != null) scheduleRebake(page)
+                onCacheReady?.invoke()
+            }
+        }
+    }
+
+    /** [page]'s markups the layers on screen don't hold yet, for the overlay to draw meanwhile. */
+    fun unbakedMarkups(page: Page): List<TextMarkup> {
+        val list = unbaked[page] ?: return emptyList()
+        var held = bgCaches[page]?.takeIf { it.cover == footprint(page) }?.seq ?: 0
+        val frame = sharpFrame
+        if (frame != null && frame.gen == sharpGen && isPastResolutionCap()) held = min(held, frame.seq)
+        val now = page.markups
+        list.removeAll { u -> u.seq <= held || now.none { it === u.markup } }
+        if (list.isEmpty()) unbaked.remove(page)
+        return list.map { it.markup }
     }
 
     /** Append a single just-committed stroke into an existing cache (cheap), else rebuild. */
@@ -1223,10 +1355,9 @@ class CanvasState(
      * baked into [caches]/[bgCaches]), so a colour-only change just needs the sharp viewport — which
      * *does* bake the paper — to re-render: bump [sharpGen]. A ruling, by contrast, lives in the
      * background cache, so a pattern/spacing/pattern-colour change must drop that page's background
-     * and let the draw loop rebuild via [backgroundForOrSchedule]. Unlike
-     * [refreshBackground] (the PDF-refine path) these do **not** early-return on a missing cache, so a
-     * plain page that *gains* a ruling rebuilds correctly; one that loses it stops drawing a background
-     * (see [hasPageBackground]).
+     * and let the draw loop rebuild via [backgroundForOrSchedule]. These do **not** early-return on a
+     * missing cache, so a plain page that *gains* a ruling rebuilds correctly; one that loses it stops
+     * drawing a background (see [hasPageBackground]).
      */
     fun invalidatePaper() {
         sharpGen++
@@ -1236,6 +1367,17 @@ class CanvasState(
         bgCaches.remove(page)
         cacheGen++
         sharpGen++
+    }
+
+    /**
+     * Rebuild [page]'s background layer in place, keeping the current one on screen until the new
+     * one lands: a host's sharper PDF render arrived for a page that got a stand-in.
+     */
+    fun refreshBackground(page: Page) {
+        if (paintPageBackground == null) return
+        if (!bgCaches.containsKey(page)) return
+        sharpGen++ // also refine the sharp viewport if it's covering this page (deep zoom)
+        scheduleBg(page, clampedRes(page))
     }
 
     fun invalidateAllBackgrounds() {
@@ -1260,6 +1402,7 @@ class CanvasState(
         caches.clear()
         staleInk.clear()
         bgCaches.clear()
+        unbaked.clear()
         hlCaches.clear()
         wetInk.clear()
         cacheGen++
@@ -1294,11 +1437,11 @@ class CanvasState(
      * out input — a full page of ink is the same work [renderInk] does on the cache thread, times
      * every cached page, on the thread the tap arrived on.
      *
-     * So it schedules instead, exactly like [refreshBackground] does for a PDF page: the current
-     * surface stays in [caches] and keeps being blitted until the rebuild lands, so the page shows
-     * its pre-edit content for a frame or two rather than blanking (the flicker [invalidateAllCaches]
-     * caused). [staleInk] is what stops [usableFor] handing that surface back as current — an edit
-     * changes neither the cover nor the resolution, so nothing else would notice.
+     * So it schedules instead: the current surface stays in [caches] and keeps being blitted until
+     * the rebuild lands, so the page shows its pre-edit content for a frame or two rather than
+     * blanking (the flicker [invalidateAllCaches] caused). [staleInk] is what stops [usableFor]
+     * handing that surface back as current — an edit changes neither the cover nor the resolution,
+     * so nothing else would notice.
      *
      * Bumps [cacheGen] so a build scheduled before the edit is discarded on publish rather than
      * overwriting the page with its pre-edit snapshot, and [sharpGen] because the sharp viewport can
@@ -1307,9 +1450,15 @@ class CanvasState(
      * untouched — undo/redo never edits it, so it must not flash either.
      */
     fun refreshAllInk() {
+        refreshInk(caches.keys.toList())
+    }
+
+    /** [refreshAllInk] for just [pages]: rebuilt off-thread, their old surfaces blitted meanwhile. */
+    fun refreshInk(pages: Collection<Page>) {
         cacheGen++
         sharpGen++
-        for (page in caches.keys.toList()) {
+        for (page in pages) {
+            if (page !in caches) continue
             staleInk.add(page)
             scheduleInk(page, clampedRes(page))
         }
@@ -1334,25 +1483,6 @@ class CanvasState(
             for ((page, rect) in byPage) repairRegion(page, rect.outset(SHARP_EDIT_PAD))
         }
         cacheGen++
-    }
-
-    /**
-     * Re-render only [page]'s background layer (e.g. a PDF page whose embedded-image colours just
-     * finished parsing), swapping the refreshed surface in when it's ready and leaving the current
-     * one on screen until then so the page never blanks. Unlike a global background flush this
-     * touches *only* [page]: other pages' cached backgrounds and in-flight builds are left intact,
-     * so refining one page never re-rasterizes — or flickers — the rest of the visible pages.
-     *
-     * Skips pages with no live background cache (off-screen now): they render stamped on their own
-     * when next scrolled into view. The rebuild is scheduled at the current generation, so on the
-     * single-threaded cache executor it lands after the (already-published) provisional build and
-     * its stamped surface wins.
-     */
-    fun refreshBackground(page: Page) {
-        if (paintPageBackground == null) return
-        if (!bgCaches.containsKey(page)) return
-        sharpGen++ // also refine the sharp viewport if it's covering this page (deep zoom)
-        scheduleBg(page, clampedRes(page))
     }
 
     /**
@@ -1384,10 +1514,71 @@ class CanvasState(
         releaseGeometryExcept(visible)
     }
 
+    /** Pages to build ahead of the viewport ([prefetch], nearest first) and pages whose caches survive the frame ([keep]). */
+    class CacheBand(val prefetch: List<Page>, val keep: Set<Page>)
+
+    /**
+     * Rows within a screenful of the viewport (at least the adjacent one; paginated, one row either side), kept one
+     * row further. Never sized by the visible page count: that flips as page edges cross the viewport, and every
+     * flip evicted the pages just prefetched.
+     */
+    fun cacheBand(): CacheBand {
+        val pages = document.pages
+        val rows = rowRanges()
+        if (rows.isEmpty()) return CacheBand(emptyList(), emptySet())
+        if (pageRects.size != pages.size) return CacheBand(emptyList(), pages.toHashSet()) // not laid out yet
+        // Rows on screen are first..last (last = first - 1 when the view sits in a gap); lo..hi adds the prefetch.
+        var first: Int
+        var last: Int
+        var lo: Int
+        var hi: Int
+        if (verticalScroll) {
+            val v = visibleContentRect()
+            fun top(r: Int) = rows[r].minOf { pageRects[it].top }
+            fun bottom(r: Int) = rows[r].maxOf { pageRects[it].bottom }
+            first = 0
+            while (first < rows.size && bottom(first) < v.top) first++
+            last = rows.lastIndex
+            while (last >= 0 && top(last) > v.bottom) last--
+            hi = last + 1
+            while (hi < rows.lastIndex && top(hi + 1) <= v.bottom + v.h) hi++
+            lo = first - 1
+            while (lo > 0 && bottom(lo - 1) >= v.top - v.h) lo--
+        } else {
+            first = currentRow.coerceIn(0, rows.lastIndex)
+            last = first
+            lo = first - 1
+            hi = first + 1
+        }
+        val prefetch = ArrayList<Page>()
+        for (r in first..last) for (i in rows[r]) prefetch += pages[i]
+        for (d in 1..max(hi - last, first - lo)) {
+            for (r in intArrayOf(last + d, first - d)) {
+                if (r in lo..hi && r in rows.indices) for (i in rows[r]) prefetch += pages[i]
+            }
+        }
+        val keep = HashSet<Page>()
+        for (r in max(lo - 1, 0)..min(hi + 1, rows.lastIndex)) for (i in rows[r]) keep += pages[i]
+        return CacheBand(prefetch, keep)
+    }
+
+    /** Runs after the visible pages are scheduled, so they build first; a pinch moving the zoom keeps the band but prefetches nothing. */
+    fun prefetchAndPrune() {
+        val band = cacheBand()
+        if (!zoomingInProgress) {
+            for (page in band.prefetch) {
+                backgroundForOrSchedule(page)
+                cacheForOrSchedule(page)
+                prefetchMath?.invoke(page, zoom)
+            }
+        }
+        dropCachesExcept(band.keep)
+    }
+
     /**
      * The pages whose rect intersects the viewport, as a contiguous `first..last` index range
      * (pages stack vertically, so the visible set is always contiguous), or null when none is
-     * visible. Used for the debug readout and to size the off-screen prefetch band.
+     * visible. Used for the debug readout.
      */
     fun visiblePageRange(): IntRange? {
         val visible = visibleContentRect()
@@ -1487,6 +1678,7 @@ class CanvasState(
         if (draws.isEmpty()) return
         pendingSharp = true
         pendingSharpEdits.clear()
+        val seq = markupSeq
         val withFlow = !flowLifted // snapshot; a session toggle bumps sharpGen and discards this
         runAsync {
             val base = surfaceFactory.create(vw, vh, 1.0).also { it.fill(bg) }
@@ -1495,12 +1687,16 @@ class CanvasState(
             postToMain {
                 pendingSharp = false
                 if (gen == sharpGen && sx == scrollX && sy == scrollY && z == zoom) {
-                    sharpFrame = SharpFrame(base, ink, sx, sy, z, gen)
+                    sharpFrame = SharpFrame(base, ink, sx, sy, z, gen, seq)
                     // Replay edits committed during the build; the item snapshot predates them.
                     for ((p, rect) in pendingSharpEdits) repairSharpInk(p, rect)
                     onCacheReady?.invoke()
                 }
                 pendingSharpEdits.clear()
+                if (sharpAgain) {
+                    sharpAgain = false
+                    requestSharpViewport()
+                }
             }
         }
     }
@@ -1587,8 +1783,8 @@ class CanvasState(
     private fun originFor(sx: Double, sy: Double, z: Double): Pt {
         val cw = contentW * z
         val ch = contentH * z
-        val ox = if (!verticalScroll || cw >= viewportW) -sx else (viewportW - cw) / 2.0
-        val oy = if (ch < viewportH) (viewportH - ch) / 2.0 else -sy
+        val ox = if (!verticalScroll || cw >= clearW) -sx else insetLeft + (clearW - cw) / 2.0
+        val oy = if (ch < clearH) insetTop + (clearH - ch) / 2.0 else -sy
         return Pt(ox, oy)
     }
 

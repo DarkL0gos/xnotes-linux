@@ -166,6 +166,75 @@ class FlowEditorTest {
     }
 
     @Test
+    fun anEmptyHeadingTypesAsAHeadingWithNothingArmed() {
+        // A caret placed back on an empty heading has no pending style left to type with.
+        val flow = TextFlow().apply { paragraphs.add(para("").apply { headingLevel = 2 }) }
+        val editor = FlowEditor(flow)
+        assertEquals(Paragraph.HEADING_STYLE, editor.charStyleAt(FlowPos.START))
+        editor.insertText(FlowPos.START, "Title")
+        assertEquals(2, flow.paragraphs[0].headingLevel)
+        assertEquals(Paragraph.HEADING_STYLE, flow.paragraphs[0].runs.single().style)
+    }
+
+    // --- a heading holds no text sized by hand ---
+
+    /** An h1 over a 12pt base, so its text measures 24pt. */
+    private fun headingFlow(vararg after: Paragraph) = TextFlow().apply {
+        defaultSizePt = 12.0
+        paragraphs.add(para("Title", Paragraph.HEADING_STYLE).apply { headingLevel = 1 })
+        paragraphs.addAll(after)
+    }
+
+    @Test
+    fun sizingPartOfAHeadingByHandMakesItBodyTextThatLooksTheSame() {
+        val flow = headingFlow()
+        val p = flow.paragraphs[0]
+        val cmd = FlowEditor(flow).setCharStyle(FlowRange(FlowPos(0, 0), FlowPos(0, 2))) { it.copy(sizePt = 30.0) }
+        assertEquals(0, p.headingLevel)
+        assertEquals(listOf("Ti", "tle"), p.runs.map { it.text })
+        assertEquals(listOf(30.0, 24.0), p.runs.map { it.style.sizePt })
+        assertTrue(p.runs.all { it.style.bold })
+        cmd!!.undo()
+        assertEquals(1, p.headingLevel)
+        assertEquals(Paragraph.HEADING_STYLE, p.runs.single().style)
+    }
+
+    @Test
+    fun textTypedAtASizeOfItsOwnMakesAHeadingBodyText() {
+        val flow = headingFlow()
+        FlowEditor(flow).insertText(FlowPos(0, 5), "!", CharStyle(bold = true, sizePt = 30.0))
+        val p = flow.paragraphs[0]
+        assertEquals(0, p.headingLevel)
+        assertEquals(listOf(24.0, 30.0), p.runs.map { it.style.sizePt })
+    }
+
+    @Test
+    fun aHeadingKeepsItsLevelThroughEditsThatSizeNothing() {
+        val flow = headingFlow()
+        val editor = FlowEditor(flow)
+        editor.insertText(FlowPos(0, 5), "s")
+        editor.setCharStyle(FlowRange(FlowPos(0, 0), FlowPos(0, 2))) { it.copy(italic = true) }
+        editor.deleteRange(FlowRange(FlowPos(0, 0), FlowPos(0, 1)))
+        assertEquals(1, flow.paragraphs[0].headingLevel)
+        assertTrue(flow.paragraphs[0].runs.all { it.style.sizePt == null })
+    }
+
+    @Test
+    fun bodyTextJoinedOntoAHeadingTakesItsSizeUnlessSizedByHand() {
+        val plain = headingFlow(para("more"))
+        FlowEditor(plain).deleteRange(FlowRange(FlowPos(0, 5), FlowPos(1, 0)))
+        val joined = plain.paragraphs.single()
+        assertEquals(1, joined.headingLevel)
+        assertEquals(24.0, resolveFont(plain, joined, joined.runs.last().style).pointSize, 1e-9)
+
+        val sized = headingFlow(para("more", CharStyle(sizePt = 20.0)))
+        FlowEditor(sized).deleteRange(FlowRange(FlowPos(0, 5), FlowPos(1, 0)))
+        val kept = sized.paragraphs.single()
+        assertEquals(0, kept.headingLevel)
+        assertEquals(listOf(24.0, 20.0), kept.runs.map { it.style.sizePt })
+    }
+
+    @Test
     fun typingWithExplicitStyleStartsAStyledRun() {
         val flow = TextFlow().apply { paragraphs.add(para("ab")) }
         FlowEditor(flow).insertText(FlowPos(0, 1), "X", CharStyle(italic = true))

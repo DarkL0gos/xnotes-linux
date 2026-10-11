@@ -15,6 +15,19 @@ enum class EraseMode(val id: String) {
     }
 }
 
+/** What the text markup tool does with a drag over PDF text: select it, or mark it as [type]. */
+enum class MarkupMode(val id: String, val type: com.xnotes.core.model.MarkupType?) {
+    SELECT("select", null),
+    HIGHLIGHT("highlight", com.xnotes.core.model.MarkupType.HIGHLIGHT),
+    UNDERLINE("underline", com.xnotes.core.model.MarkupType.UNDERLINE),
+    STRIKEOUT("strikeout", com.xnotes.core.model.MarkupType.STRIKEOUT),
+    SQUIGGLY("squiggly", com.xnotes.core.model.MarkupType.SQUIGGLY);
+
+    companion object {
+        fun fromId(id: String?): MarkupMode = entries.firstOrNull { it.id == id } ?: HIGHLIGHT
+    }
+}
+
 /**
  * The style record carried by stroke tools and used as the eraser/lasso size
  * carrier (spec 04 §2). A [com.xnotes.core.model.Stroke] stores a **copy** at
@@ -71,13 +84,27 @@ data class ToolConfig(
      *  is under it. A multiply has nothing to darken on a dark page, where it ends up tinting the
      *  light ink instead of the paper. Only used by [Tool.HIGHLIGHTER]. */
     val highlighterInverse: Boolean = false,
-)
+    /** Text markup tool: what a drag over PDF text does. Only used by [Tool.MARKUP]. */
+    val markupMode: MarkupMode = MarkupMode.HIGHLIGHT,
+    /** Text markup tool: how deep a new highlight's colour goes, in [MARKUP_INTENSITY_MIN, 1]. Only [Tool.MARKUP]. */
+    val markupIntensity: Double = DEFAULT_MARKUP_INTENSITY,
+    /** Eraser: also take off the PDF text markups it touches. Only used by [Tool.ERASER]. */
+    val eraseMarkups: Boolean = true,
+) {
+    companion object {
+        const val DEFAULT_MARKUP_INTENSITY = 0.5
+        const val MARKUP_INTENSITY_MIN = 0.1
+    }
+}
 
 /** Factory defaults per tool (spec 04 §3). */
 object ToolDefaults {
-    /** Tip width the taper pen eases down to, and the value assumed for legacy taper strokes that
-     *  predate the setting, so they reload tapered rather than as a sharp point. */
-    const val DEFAULT_TAPER_TIP = 0.30
+    /** Tip width the taper pen eases down to. */
+    const val DEFAULT_TAPER_TIP = 0.50
+
+    /** Tip assumed for legacy taper strokes that predate the setting, so they reload tapered
+     *  rather than as a sharp point. Pinned: it must not follow [DEFAULT_TAPER_TIP]. */
+    const val LEGACY_TAPER_TIP = 0.30
 
     fun configFor(tool: Tool): ToolConfig = when (tool) {
         Tool.PEN -> ToolConfig(baseWidth = 3.0, pressureEnabled = true, pressureMinFactor = 0.35, directionStrength = 0.0)
@@ -93,7 +120,7 @@ object ToolDefaults {
     }
 
     /** Tools whose config is persisted in settings (spec 09 §2). */
-    val persistedTools = listOf(Tool.PEN, Tool.DASHED, Tool.CALLIGRAPHY, Tool.SPEED, Tool.TAPER, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.LASSO)
+    val persistedTools = listOf(Tool.PEN, Tool.DASHED, Tool.CALLIGRAPHY, Tool.SPEED, Tool.TAPER, Tool.HIGHLIGHTER, Tool.ERASER, Tool.SELECT, Tool.LASSO, Tool.MARKUP)
 }
 
 /**

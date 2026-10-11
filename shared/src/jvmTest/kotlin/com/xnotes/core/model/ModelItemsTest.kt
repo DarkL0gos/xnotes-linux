@@ -5,7 +5,7 @@ import com.xnotes.core.FakeTextMeasurer
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.stroke.Sample
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.tools.ToolDefaults
@@ -119,7 +119,7 @@ class ModelItemsTest {
     @Test fun shapePaintDispatch() {
         val r = FakeRenderer()
         ShapeItem(ShapeKind.RECTANGLE, Pt(0.0, 0.0), Pt(10.0, 10.0), Rgba(0, 0, 0), 3.0, fillRgba = Rgba(0, 0, 0, 64)).paint(r)
-        assertTrue(r.ops.containsAll(listOf("fillRect", "strokeRect")))
+        assertEquals(listOf("fillPath", "strokePath"), r.ops)
     }
 
     @Test fun shapeHandleRoundTrip() {

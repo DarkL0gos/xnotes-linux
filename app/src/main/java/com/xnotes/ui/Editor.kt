@@ -40,7 +40,7 @@ import com.xnotes.core.model.insets
 import com.xnotes.core.model.paintMarginPattern
 import com.xnotes.core.model.paintPagePattern
 import com.xnotes.core.model.resolvedPageColor
-import com.xnotes.core.model.resolvedPattern
+import com.xnotes.core.model.resolvedTemplate
 import com.xnotes.core.model.resolvedPatternColor
 import com.xnotes.core.model.resolvedSpacing
 import com.xnotes.core.text.CharStyle
@@ -268,7 +268,7 @@ class Editor(context: Context, val pane: Pane = Pane.PRIMARY) : ToolPopupHost, S
     private val textMeasurer = AndroidTextMeasurer()
     private val imageCodec = AndroidImageCodec()
     private val codec = DocumentCodec(imageCodec, textMeasurer)
-    private val canvasCodec = com.xnotes.format.CanvasCodec(imageCodec)
+    private val canvasCodec = com.xnotes.format.CanvasCodec(imageCodec, textMeasurer)
 
     /** One flow layout + snapshot: repainted from cache threads, so only the published frame is read. */
     private class PublishedFlow(val frame: FlowFrame, val indexOf: Map<Page, Int>)
@@ -862,7 +862,7 @@ class Editor(context: Context, val pane: Pane = Pane.PRIMARY) : ToolPopupHost, S
         if (!flowText.active) return
         val text = clipboardText() ?: return
         val caretSize = flowCaretStyle().sizePt
-        val paras = com.xnotes.core.text.MarkdownParser.parse(text, caretSize ?: flowDefaultSizePt())
+        val paras = com.xnotes.core.text.MarkdownParser.parse(text)
         if (caretSize != null) {
             for (p in paras) {
                 for (run in p.runs) {
@@ -2009,10 +2009,10 @@ class Editor(context: Context, val pane: Pane = Pane.PRIMARY) : ToolPopupHost, S
         page.resolvedPageColor(doc, state.pageColorOverride) ?: state.palette.paper
 
     private fun paintExportRuling(doc: Document, page: Page, r: Renderer) {
-        val pattern = page.resolvedPattern(doc)
-        if (pattern == PagePattern.NONE) return
+        // The built-in templates are the classic rulings.
+        val pattern = PagePattern.fromId(page.resolvedTemplate(doc))?.takeIf { it != PagePattern.NONE } ?: return
         val color = page.resolvedPatternColor(doc)
-        val spacing = page.resolvedSpacing(doc)
+        val spacing = page.resolvedSpacing(doc) ?: com.xnotes.core.model.PageStyle.DEFAULT_SPACING
         val content = com.xnotes.core.geometry.Rect(0.0, 0.0, page.width, page.height)
         val cover = exportFootprint(doc, page)
         // Mirrors the canvas: a blank note page is ruled whole, an imported PDF page only in its margins.
@@ -4532,8 +4532,8 @@ class Editor(context: Context, val pane: Pane = Pane.PRIMARY) : ToolPopupHost, S
         toolbarColors.getOrNull(index)?.let { settings = settings.rememberColor(it) }
     }
 
-    fun setShapeKind(kind: com.xnotes.core.tools.ShapeKind) {
-        shapeConfig = shapeConfig.copy(shape = kind)
+    fun setShapeKind(kind: com.xnotes.core.shapes.ShapeKind) {
+        shapeConfig = shapeConfig.copy(preset = com.xnotes.core.shapes.ShapePresets.forKind(kind).key)
         controller.shapeConfig = shapeConfig
     }
 

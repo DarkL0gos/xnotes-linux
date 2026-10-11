@@ -5,6 +5,8 @@ import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.model.ImageData
 import com.xnotes.core.model.Rgba
+import com.xnotes.core.vector.PathFlattener
+import com.xnotes.core.vector.VectorContour
 
 /** Polygon fill rule (spec 01 §1). Both are required. */
 enum class FillRule { NONZERO, EVEN_ODD }
@@ -39,6 +41,32 @@ data class Pen(
     /** Soft outward glow (page-px blur) on the stroke — the neon halo for shapes. 0 = crisp. */
     val glowRadius: Double = 0.0,
 )
+
+/**
+ * What a stretch of drawing is, for a backend that records a document's structure (a tagged PDF
+ * a screen reader can follow). Painters announce it with [Renderer.beginMark]; every other
+ * backend ignores it. Marks that stand for one thing on the page are instances, so two images
+ * drawn back to back stay two images.
+ */
+sealed class Mark {
+    /** Paper, ruling, highlights, chips, rules: what a reader skips. */
+    object Decoration : Mark()
+
+    /** Characters [start, end) of flow paragraph [para]. */
+    class FlowText(val para: Int, val start: Int, val end: Int) : Mark()
+
+    /** The bullet, number or box of flow list paragraph [para]. */
+    class FlowMarker(val para: Int) : Mark()
+
+    /** Handwriting and shapes. */
+    object Drawing : Mark()
+
+    /** One inserted image. */
+    class Image : Mark()
+
+    /** One text box, occupying [bounds] on the page. */
+    class TextBox(val bounds: Rect) : Mark()
+}
 
 /**
  * Immediate-mode 2D vector painter (spec 01 §1). The application issues draw
@@ -157,6 +185,24 @@ interface Renderer {
     fun strokePolygon(points: List<Pt>, pen: Pen)
     fun strokeEllipse(center: Pt, rx: Double, ry: Double, pen: Pen)
 
+    // --- paths of lines and cubics (shapes) ---
+
+    /** Fill [contours] as one path under [rule]. The default fills a flattened copy of each on its own. */
+    fun fillPath(contours: List<VectorContour>, color: Rgba, rule: FillRule = FillRule.NONZERO) {
+        for (c in contours) {
+            val pts = PathFlattener.flatten(c, PATH_FALLBACK_TOLERANCE)
+            if (pts.size >= 3) fillPolygon(pts, color, rule)
+        }
+    }
+
+    /** Stroke [contours] with [pen]. The default strokes a flattened copy of each. */
+    fun strokePath(contours: List<VectorContour>, pen: Pen) {
+        for (c in contours) {
+            val pts = PathFlattener.flatten(c, PATH_FALLBACK_TOLERANCE)
+            if (c.closed) strokePolygon(pts, pen) else strokePolyline(pts, pen)
+        }
+    }
+
     // --- raster + text ---
     /** Draw [raster] scaled into [dest] (optionally only [src] sub-rect), smooth sampling. */
     fun drawRaster(raster: RasterSurface, dest: Rect, src: Rect? = null)
@@ -183,13 +229,72 @@ interface Renderer {
     fun drawText(text: String, rect: Rect, font: FontSpec, color: Rgba, flags: TextFlags = TextFlags())
 
     /**
+     * [drawText] turned [angle] radians clockwise about [rect]'s centre: a shape's label, which
+     * turns with its shape. Laid-out text is the other thing that cannot turn by moving points.
+     * The default draws it upright, for backends that never meet a turned shape.
+     */
+    fun drawTextTurned(text: String, rect: Rect, font: FontSpec, color: Rgba, flags: TextFlags, angle: Double) =
+        drawText(text, rect, font, color, flags)
+
+    /**
      * Draw a single pre-positioned line fragment with its left edge at [x] and its
      * baseline at [baseline] (content space, no wrapping). The flow-text painter
      * places these from [TextMeasurer.advances] prefix sums, so the two must share
-     * one paint. Default is a no-op for backends that never see flow text (PDF
-     * vector export receives it pre-rasterized).
+     * one paint. Default is a no-op for backends that never see flow text.
      */
     fun drawTextRun(text: String, x: Double, baseline: Double, font: FontSpec, color: Rgba) {}
+
+    /**
+     * True for a backend that writes real text a reader can select and copy (PDF
+     * export). Painters then also hand it what the screen never draws: the spaces
+     * between words, as runs of their own, so copied text keeps its word breaks
+     * and a code block its indentation.
+     */
+    val writesText: Boolean get() = false
+
+    /** What the drawing from here to [endMark] is. Only a structure-recording backend cares. */
+    fun beginMark(mark: Mark) {}
+
+    fun endMark() {}
+
+    /**
+     * A list bullet: a dot of [radius] at [center], on a line whose baseline is at
+     * [baseline] and whose text is set in [font]. A backend writing real text makes it
+     * a glyph that copies as "•"; everything else just paints the dot.
+     */
+    fun drawBullet(center: Pt, radius: Double, baseline: Double, font: FontSpec, color: Rgba) =
+        fillCircle(center, radius, color)
+
+    /**
+     * A checklist box outlined [stroke] wide, filled inside when [checked]. A backend
+     * writing real text makes it a glyph that copies as "☐" or "☑".
+     */
+    fun drawCheckbox(box: Rect, stroke: Double, checked: Boolean, baseline: Double, font: FontSpec, color: Rgba) {
+        strokeRect(box, Pen(color, width = stroke, cosmetic = false))
+        // Checked state is a solid inner fill: legible on any paper without knowing it.
+        if (checked) fillRect(box.outset(-box.w * 0.25), color)
+    }
+
+    /**
+     * Draw the formula [latex] sets at [sizePt], its left edge at [x] and its own
+     * baseline on [baseline] so it sits on the line like a word. The backend that
+     * draws this must be the one behind [MathTypesetter], which already measured
+     * the same string, or the text will wrap around a box that is not there.
+     * False when it cannot draw the formula yet, having gone to set it elsewhere:
+     * the caller then shows [drawMathPending] where it goes. Default is a no-op,
+     * like [drawTextRun], for backends that never see maths.
+     */
+    fun drawMath(
+        latex: String,
+        x: Double,
+        baseline: Double,
+        sizePt: Double,
+        color: Rgba,
+        display: Boolean = false,
+    ): Boolean = true
+
+    /** Stand in at [box], tinted from [color], for [latex] while it is still being set. */
+    fun drawMathPending(latex: String, sizePt: Double, display: Boolean, box: Rect, color: Rgba) {}
 
     /** Run [block] between matching [save]/[restore] calls. */
     fun withSave(block: () -> Unit) {
@@ -201,6 +306,9 @@ interface Renderer {
         }
     }
 }
+
+/** Content px a curve may stray when a backend without real paths flattens one. */
+private const val PATH_FALLBACK_TOLERANCE = 0.1
 
 /** Packed interleaved x,y → [Pt] list, for the default (non-hot) packed-primitive fallbacks. */
 private fun unpackPts(pts: FloatArray): List<Pt> =

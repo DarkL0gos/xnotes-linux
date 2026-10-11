@@ -1,11 +1,26 @@
 package com.xnotes.core.tools
 
+import com.xnotes.core.model.Rgba
+import com.xnotes.core.shapes.ShapeKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolsTest {
+
+    @Test fun theMarkupToolHighlightsAtHalfAndPansAFreeFinger() {
+        val c = ToolDefaults.configFor(Tool.MARKUP)
+        assertEquals(MarkupMode.HIGHLIGHT, c.markupMode)
+        assertEquals(0.5, c.markupIntensity, 1e-9)
+        assertTrue(Tool.MARKUP.fingerPansWhenOff)
+        assertFalse(Tool.MARKUP.isStroke)
+        assertTrue(Tool.MARKUP in Tool.wheelOrder && Tool.MARKUP in ToolDefaults.persistedTools)
+        assertEquals(MarkupMode.HIGHLIGHT, MarkupMode.fromId("nonsense"))
+        assertEquals(null, MarkupMode.SELECT.type)
+        assertEquals(com.xnotes.core.model.MarkupType.SQUIGGLY, MarkupMode.SQUIGGLY.type)
+    }
 
     @Test fun factoryDefaultsMatchSpec() {
         assertEquals(ToolConfig(3.0, true, 0.35, 0.0), ToolDefaults.configFor(Tool.PEN).copy(rgba = ToolConfig().rgba))
@@ -63,8 +78,19 @@ class ToolsTest {
         assertEquals(ShapeKind.TRIANGLE, ShapeKind.fromId("triangle"))
     }
 
+    @Test fun theShapeToolsFillReachesClosedKindsOnly() {
+        val ink = Rgba(10, 20, 30)
+        val on = ShapeConfig(fill = true, fillAlpha = 0.5)
+        assertEquals(Rgba(10, 20, 30, 127), on.fillFor(ShapeKind.POLYGON, ink))
+        assertEquals(Rgba(10, 20, 30, 127), on.fillFor(ShapeKind.ELLIPSE, ink))
+        assertNull(on.fillFor(ShapeKind.POLYLINE, ink))
+        assertNull(on.fillFor(ShapeKind.CURVE, ink))
+        assertNull(on.fillFor(ShapeKind.LINE, ink))
+        assertNull(ShapeConfig(fill = false).fillFor(ShapeKind.RECTANGLE, ink))
+    }
+
     @Test fun toolIdRoundTrip() {
         for (t in Tool.entries) assertEquals(t, Tool.fromId(t.id))
-        assertEquals(13, Tool.wheelOrder.size)
+        assertEquals(14, Tool.wheelOrder.size)
     }
 }

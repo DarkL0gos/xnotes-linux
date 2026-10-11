@@ -105,10 +105,17 @@ class MeshBuilder(vertexHint: Int = 64, indexHint: Int = 96) {
     /**
      * A constant-width ribbon down [points], with a disc at every vertex so ends are round and hard
      * turns cannot pinch. This is the shape outline's equivalent of the ink ribbon, and it draws the
-     * same silhouette a round-capped, round-joined pen would.
+     * same silhouette a round-capped, round-joined pen would. With a [joinDiscAngle] the inner
+     * discs go only where the line turns by more than that, which spares a flattened curve one per
+     * step; the ends always get theirs.
      */
-    fun polylineRibbon(points: List<Pt>, halfWidth: Double, closed: Boolean, tolerance: Double) =
-        polylineRibbon(points, 0, points.size, halfWidth, closed, tolerance)
+    fun polylineRibbon(
+        points: List<Pt>,
+        halfWidth: Double,
+        closed: Boolean,
+        tolerance: Double,
+        joinDiscAngle: Double = -1.0,
+    ) = polylineRibbon(points, 0, points.size, halfWidth, closed, tolerance, joinDiscAngle)
 
     /**
      * [count] points of [points] from [from], as their own ribbon.
@@ -124,6 +131,7 @@ class MeshBuilder(vertexHint: Int = 64, indexHint: Int = 96) {
         halfWidth: Double,
         closed: Boolean,
         tolerance: Double,
+        joinDiscAngle: Double = -1.0,
     ) {
         if (from < 0 || count <= 0 || from + count > points.size) return
         if (halfWidth <= 0.0 || count < 2) {
@@ -151,7 +159,24 @@ class MeshBuilder(vertexHint: Int = 64, indexHint: Int = 96) {
             triangle(v0, v3, v2)
         }
         // A disc at every vertex rounds the two ends and fills the notch at each corner.
-        for (i in 0 until n) circle(points[from + i].x, points[from + i].y, halfWidth, tolerance)
+        for (i in 0 until n) {
+            val isEnd = !closed && (i == 0 || i == n - 1)
+            if (!isEnd && joinDiscAngle >= 0.0 && turnAt(points, from, n, i) <= joinDiscAngle) continue
+            circle(points[from + i].x, points[from + i].y, halfWidth, tolerance)
+        }
+    }
+
+    /** How far the ring of [n] points from [from] turns at its [i]th, in radians; a stall counts as a full turn. */
+    private fun turnAt(points: List<Pt>, from: Int, n: Int, i: Int): Double {
+        val a = points[from + (i + n - 1) % n]
+        val b = points[from + i]
+        val c = points[from + (i + 1) % n]
+        val ux = b.x - a.x
+        val uy = b.y - a.y
+        val vx = c.x - b.x
+        val vy = c.y - b.y
+        if (hypot(ux, uy) < 1e-9 || hypot(vx, vy) < 1e-9) return PI
+        return abs(kotlin.math.atan2(ux * vy - uy * vx, ux * vx + uy * vy))
     }
 
     /**

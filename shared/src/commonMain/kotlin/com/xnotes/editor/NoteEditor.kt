@@ -488,9 +488,12 @@ class NoteEditor(
      * repaints; a ruling change ([pages] are the pages it may affect) rebuilds their background caches.
      */
     private fun applyStyleChange(prev: PageStyle, next: PageStyle, pages: List<Page>) {
-        val rulingChanged = prev.pattern != next.pattern ||
+        val rulingChanged = prev.template != next.template ||
             prev.patternColor != next.patternColor ||
-            prev.spacing != next.spacing
+            prev.spacing != next.spacing ||
+            prev.accentColor != next.accentColor ||
+            prev.params != next.params ||
+            prev.colors != next.colors
         if (rulingChanged) {
             if (pages.size == 1) state.invalidateBackground(pages[0]) else state.invalidateAllBackgrounds()
         } else {

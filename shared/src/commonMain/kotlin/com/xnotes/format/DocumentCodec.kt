@@ -4,6 +4,8 @@ import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.model.Bookmark
 import com.xnotes.core.model.CanvasItem
+import com.xnotes.core.model.ConnectorEnd
+import com.xnotes.core.model.ConnectorItem
 import com.xnotes.core.model.Document
 import com.xnotes.core.model.ImageData
 import com.xnotes.core.model.ImageItem
@@ -11,12 +13,16 @@ import com.xnotes.core.model.Orientation
 import com.xnotes.core.model.Page
 import com.xnotes.core.model.PageMargins
 import com.xnotes.core.model.PagePattern
+import com.xnotes.core.model.PageTemplates
 import com.xnotes.core.model.PageSize
 import com.xnotes.core.model.PageStyle
 import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.Routing
 import com.xnotes.core.model.ShapeItem
+import com.xnotes.core.model.ShapeLabel
 import com.xnotes.core.model.Stroke
 import com.xnotes.core.model.TextItem
+import com.xnotes.core.model.TextStyle
 import com.xnotes.core.pal.FontFace
 import com.xnotes.core.pal.ImageCodec
 import com.xnotes.core.pal.TextMeasurer
@@ -36,9 +42,14 @@ import com.xnotes.core.platform.parseInstant
 import com.xnotes.core.platform.pathString
 import com.xnotes.core.platform.InputStream
 import com.xnotes.core.platform.OutputStream
+import com.xnotes.core.pdf.PdfPageGeometry
 import com.xnotes.core.stroke.Sample
 import com.xnotes.core.stroke.StrokeSimplify
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.Axis
+import com.xnotes.core.shapes.Elbow
+import com.xnotes.core.shapes.FreePath
+import com.xnotes.core.shapes.Head
+import com.xnotes.core.shapes.ShapeKind
 import com.xnotes.core.tools.Tool
 import com.xnotes.core.tools.ToolConfig
 import com.xnotes.core.tools.ToolDefaults
@@ -46,6 +57,7 @@ import com.xnotes.core.util.Svg
 import okio.FileSystem
 import okio.buffer
 import okio.use
+import com.xnotes.core.vector.PathFlattener
 
 /** Thrown when a file is not a valid `.xnote` bundle. */
 class XNoteFormatException(message: String) : Exception(message)
@@ -60,6 +72,8 @@ class XNoteFormatException(message: String) : Exception(message)
 class DocumentCodec(
     private val imageCodec: ImageCodec,
     private val textMeasurer: TextMeasurer,
+    /** How page [Int] of a document's PDF maps to its points as displayed, when the PDF is at hand, for the markups' PDF coordinates. */
+    private val pdfGeometry: (Document, Int) -> PdfPageGeometry? = { _, _ -> null },
 ) {
 
     /** Thrown out of [write] when [isCancelled] turns true mid-copy, so the caller can discard the partial file. */
@@ -142,6 +156,14 @@ class DocumentCodec(
         if (!doc.flow.isEmpty || !com.xnotes.core.text.FlowDefaults.of(doc.flow).isEmpty) {
             zos.putDeflated(FlowXml.ENTRY_NAME, FlowXml.write(doc.flow))
         }
+        // The templates the styles name ride along, so the note draws the same without them installed.
+        for ((key, text) in usedTemplates(doc)) {
+            zos.putDeflated("$TEMPLATE_DIR$key$TEMPLATE_EXT", text.encodeToByteArray())
+        }
+        // Text markups, in their own XFDF entry written only when there are any, like the flow.
+        if (doc.pages.any { it.markups.isNotEmpty() }) {
+            zos.putDeflated(MarkupsXfdf.ENTRY_NAME, MarkupsXfdf.write(doc.pages) { geometryOf(doc, doc.pages[it]) })
+        }
         // The manifest streams straight into the deflater: a dense note's JSON is never
         // materialized as an org.json DOM, a String, or a byte[] (three copies per save).
         zos.putNextEntry(ZipEntry("manifest.json").apply { setMethod(ZipMethod.DEFLATED) })
@@ -152,6 +174,18 @@ class DocumentCodec(
         zos.closeEntry()
         timing?.deflateMs = probe.nanos / 1_000_000L
         timing?.manifestBytes = probe.bytes
+    }
+
+    /** [page]'s map into PDF user space: its source page's, else its own points with y up. */
+    private fun geometryOf(doc: Document, page: Page): PdfPageGeometry =
+        page.pdfPage?.let { pdfGeometry(doc, it) } ?: PdfPageGeometry.flipped(page.height * 72.0 / doc.dpi)
+
+    /** The embedded templates [doc]'s styles name, in key order; built-in rulings need none. */
+    internal fun usedTemplates(doc: Document): List<Pair<String, String>> {
+        val keys = HashSet<String>()
+        doc.style.template?.let { keys.add(it) }
+        for (page in doc.pages) page.style.template?.let { keys.add(it) }
+        return keys.sorted().mapNotNull { k -> doc.templates[k]?.let { k to it } }
     }
 
     /**
@@ -212,6 +246,8 @@ class DocumentCodec(
         j.name("pdf_page")
         page.pdfPage?.let { j.value(it) } ?: j.nullValue()
         j.name("items").beginArray()
+        // Ids only for what a connector on this page glues to; a page without connectors writes none.
+        val ids = GlueIds.of(page.items)
         for (item in page.items) {
             when (item) {
                 is Stroke -> writeStroke(j, item)
@@ -219,10 +255,11 @@ class DocumentCodec(
                     // The name was decided by [imageAssets]' walk of these same items; taking it
                     // from there keeps the entry and the manifest agreeing by construction.
                     val name = assets.getOrNull(nextAsset[0]++)?.first ?: continue
-                    writeImage(j, item, name)
+                    writeImage(j, item, name, ids[item])
                 }
-                is TextItem -> writeText(j, item)
-                is ShapeItem -> writeShape(j, item)
+                is TextItem -> writeText(j, item, ids[item])
+                is ShapeItem -> writeShape(j, item, ids[item])
+                is ConnectorItem -> writeConnector(j, item, ids)
                 else -> {} // unrecognized kind: not written
             }
         }
@@ -287,9 +324,11 @@ class DocumentCodec(
         j.endObject()
     }
 
-    private fun writeImage(j: JsonWrite, item: ImageItem, assetName: String) {
+    private fun writeImage(j: JsonWrite, item: ImageItem, assetName: String, id: Int?) {
         j.beginObject()
         j.name("kind").value(ImageItem.KIND)
+        // Only on an item a connector glues to.
+        id?.let { j.name("id").value(it) }
         j.name("asset").value(assetName)
         j.name("rect").beginArray().value(item.rect.x).value(item.rect.y).value(item.rect.w).value(item.rect.h).endArray()
         j.name("src_w").value(item.image.width)
@@ -301,9 +340,10 @@ class DocumentCodec(
         j.endObject()
     }
 
-    private fun writeText(j: JsonWrite, t: TextItem) {
+    private fun writeText(j: JsonWrite, t: TextItem, id: Int?) {
         j.beginObject()
         j.name("kind").value(TextItem.KIND)
+        id?.let { j.name("id").value(it) }
         j.name("pos").beginArray().value(t.pos.x).value(t.pos.y).endArray()
         j.name("width").value(t.width)
         j.name("text").value(t.text)
@@ -318,21 +358,42 @@ class DocumentCodec(
         j.endObject()
     }
 
-    private fun writeShape(j: JsonWrite, s: ShapeItem) {
+    private fun writeShape(j: JsonWrite, s: ShapeItem, id: Int?) {
+        // A shape older readers cannot draw goes down as the polygon they can, its real geometry after.
+        val standIn = s.legacyOutline()
+        val drawn = standIn?.let { Rect.bounding(it) }
+        // Drawn text has no shape an older reader could stand in, so it goes under a kind they skip.
+        val glyphs = s.shape == ShapeKind.GLYPHS
         j.beginObject()
-        j.name("kind").value(ShapeItem.KIND)
-        j.name("shape").value(s.shape.id)
-        j.name("start").beginArray().value(s.start.x).value(s.start.y).endArray()
-        j.name("end").beginArray().value(s.end.x).value(s.end.y).endArray()
+        j.name("kind").value(if (glyphs) ShapeItem.GLYPHS_KIND else ShapeItem.KIND)
+        id?.let { j.name("id").value(it) }
+        j.name("shape").value(s.legacyId())
+        j.name("start").beginArray().value(drawn?.left ?: s.start.x).value(drawn?.top ?: s.start.y).endArray()
+        j.name("end").beginArray().value(drawn?.right ?: s.end.x).value(drawn?.bottom ?: s.end.y).endArray()
         j.name("stroke_rgba")
         writeRgba(j, s.strokeRgba)
         j.name("stroke_width").value(s.strokeWidth)
         j.name("fill_rgba")
         s.fillRgba?.let { writeRgba(j, it) } ?: j.nullValue()
         // Polygon/polyline carry their vertices (absolute content px); other kinds omit them.
-        s.vertices()?.let { verts ->
+        (standIn ?: s.vertices()?.takeUnless { glyphs })?.let { verts ->
             j.name("points").beginArray()
             for (p in verts) j.beginArray().value(p.x).value(p.y).endArray()
+            j.endArray()
+        }
+        if (standIn != null || glyphs) {
+            if (!s.isFree) j.name("geom").value(s.shape.id)
+            val f = s.box
+            j.name("rect").beginArray().value(f.x).value(f.y).value(f.w).value(f.h).endArray()
+            if (s.rotation != 0.0) j.name("angle").value(s.rotation)
+            s.path?.takeIf { s.isFree && (glyphs || !FreePath.isVertexList(it)) }?.let { j.name("path").value(FreePath.toSvg(it)) }
+        }
+        if (s.n != s.shape.defaultN) j.name("n").value(s.n)
+        if (s.headStart != s.shape.defaultHeadStart) j.name("head_start").value(s.headStart.id)
+        if (s.headEnd != s.shape.defaultHeadEnd) j.name("head_end").value(s.headEnd.id)
+        if (!s.adj.contentEquals(s.shape.defaultAdj)) {
+            j.name("adj").beginArray()
+            for (v in s.adj) j.value(v)
             j.endArray()
         }
         // Glow is additive: a plain shape serializes exactly as before.
@@ -346,7 +407,92 @@ class DocumentCodec(
             j.name("dash_length").value(s.dashLength)
             j.name("dash_gap").value(s.dashGap)
         }
+        // A label is additive too: written only on a labelled shape.
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            j.name("label").beginObject()
+            j.name("text").value(l.text)
+            j.name("rgba")
+            writeRgba(j, l.style.rgba)
+            j.name("point_size").value(l.style.pointSize)
+            if (l.style.face != TextItem.DEFAULT_FACE) j.name("font_face").value(l.style.face.id)
+            if (s.labelAt != 0.5) j.name("at").value(s.labelAt)
+            j.endObject()
+        }
         if (s.locked) j.name("locked").value(true)
+        j.endObject()
+    }
+
+    /**
+     * A connector goes down as the plain polyline it draws, which older readers show as it is, and
+     * then as itself: its routing, its two ends (glued ones naming their item's id and point) and its
+     * route. Its style and label are a shape's.
+     */
+    private fun writeConnector(j: JsonWrite, c: ConnectorItem, ids: Map<CanvasItem, Int>) {
+        val line = PathFlattener.flatten(c.body(), STAND_IN_FLATTEN)
+        val drawn = Rect.bounding(line)
+        j.beginObject()
+        j.name("kind").value(ShapeItem.KIND)
+        ids[c]?.let { j.name("id").value(it) }
+        j.name("shape").value(ShapeKind.POLYLINE.id)
+        j.name("start").beginArray().value(drawn.left).value(drawn.top).endArray()
+        j.name("end").beginArray().value(drawn.right).value(drawn.bottom).endArray()
+        j.name("stroke_rgba")
+        writeRgba(j, c.strokeRgba)
+        j.name("stroke_width").value(c.strokeWidth)
+        j.name("fill_rgba").nullValue()
+        j.name("points").beginArray()
+        for (p in line) j.beginArray().value(p.x).value(p.y).endArray()
+        j.endArray()
+        if (c.headStart != Head.NONE) j.name("head_start").value(c.headStart.id)
+        if (c.headEnd != Head.NONE) j.name("head_end").value(c.headEnd.id)
+        if (c.neon) {
+            j.name("neon").value(true)
+            j.name("neon_strength").value(c.neonStrength)
+        }
+        if (c.dashed) {
+            j.name("dashed").value(true)
+            j.name("dash_length").value(c.dashLength)
+            j.name("dash_gap").value(c.dashGap)
+        }
+        j.name("connector").beginObject()
+        j.name("routing").value(c.routing.id)
+        j.name("from")
+        writeEnd(j, c.start, ids)
+        j.name("to")
+        writeEnd(j, c.end, ids)
+        if (c.routing.orthogonal) {
+            j.name("axis").value(if (c.elbow.first == Axis.H) "h" else "v")
+            j.name("coords").beginArray()
+            for (v in c.elbow.coords) j.value(v)
+            j.endArray()
+        } else if (c.waypoints.isNotEmpty()) {
+            j.name("waypoints").beginArray()
+            for (p in c.waypoints) j.beginArray().value(p.x).value(p.y).endArray()
+            j.endArray()
+        }
+        j.endObject()
+        c.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            j.name("label").beginObject()
+            j.name("text").value(l.text)
+            j.name("rgba")
+            writeRgba(j, l.style.rgba)
+            j.name("point_size").value(l.style.pointSize)
+            if (l.style.face != TextItem.DEFAULT_FACE) j.name("font_face").value(l.style.face.id)
+            if (c.labelAt != 0.5) j.name("at").value(c.labelAt)
+            j.endObject()
+        }
+        if (c.locked) j.name("locked").value(true)
+        j.endObject()
+    }
+
+    /** Where a connector end sits, and what it is glued to when that is on the page too. */
+    private fun writeEnd(j: JsonWrite, e: ConnectorEnd, ids: Map<CanvasItem, Int>) {
+        j.beginObject()
+        j.name("at").beginArray().value(e.at.x).value(e.at.y).endArray()
+        e.target?.let { ids[it] }?.let { id ->
+            j.name("item").value(id)
+            j.name("point").value(e.point)
+        }
         j.endObject()
     }
 
@@ -362,12 +508,32 @@ class DocumentCodec(
             j.name("page_color")
             writeRgba(j, it)
         }
-        s.pattern?.let { j.name("pattern").value(it.id) }
+        s.template?.let { t ->
+            // Built-in rulings keep the old "pattern" name, so older builds still draw them.
+            if (t == PageTemplates.NONE || PageTemplates.isBuiltIn(t)) j.name("pattern").value(t) else j.name("template").value(t)
+        }
         s.patternColor?.let {
             j.name("pattern_color")
             writeRgba(j, it)
         }
         s.spacing?.let { j.name("spacing").value(it) }
+        s.accentColor?.let {
+            j.name("accent_color")
+            writeRgba(j, it)
+        }
+        s.params?.takeIf { it.isNotEmpty() }?.let { params ->
+            j.name("params").beginObject()
+            for ((k, v) in params.entries.sortedBy { it.key }) j.name(k).value(v)
+            j.endObject()
+        }
+        s.colors?.takeIf { it.isNotEmpty() }?.let { colors ->
+            j.name("colors").beginObject()
+            for ((k, v) in colors.entries.sortedBy { it.key }) {
+                j.name(k)
+                writeRgba(j, v)
+            }
+            j.endObject()
+        }
         j.endObject()
     }
 
@@ -396,6 +562,8 @@ class DocumentCodec(
     ): Document {
         var manifest: ParsedManifest? = null
         var flowBytes: ByteArray? = null
+        var markupBytes: ByteArray? = null
+        val templates = HashMap<String, String>()
         val imageFiles = HashMap<String, File>()
         var pdfFile: File? = null
         ZipInputStream(input).use { zis ->
@@ -439,6 +607,12 @@ class DocumentCodec(
                         }
                     } else if (name == FlowXml.ENTRY_NAME) {
                         flowBytes = readRemaining(zis)
+                    } else if (name == MarkupsXfdf.ENTRY_NAME) {
+                        markupBytes = readAtMost(zis, MarkupsXfdf.MAX_BYTES)
+                    } else if (name.startsWith(TEMPLATE_DIR) && name.endsWith(TEMPLATE_EXT)) {
+                        val key = name.substring(TEMPLATE_DIR.length, name.length - TEMPLATE_EXT.length)
+                        val bytes = readAtMost(zis, TemplateReader.MAX_BYTES)
+                        if (TEMPLATE_KEY.matches(key) && bytes != null) templates[key] = bytes.decodeToString()
                     }
                     // Anything else is an asset from a newer version: skipped, never buffered.
                 }
@@ -452,6 +626,7 @@ class DocumentCodec(
 
         val doc = Document(dpi = m.dpi)
         doc.created = m.created
+        doc.templates = templates
         doc.style = m.style
         doc.margins = m.margins
 
@@ -469,16 +644,24 @@ class DocumentCodec(
             return doc
         }
         doc.pages.addAll(m.pages)
+        markupBytes?.let { MarkupsXfdf.readInto(doc.pages, it) }
 
         // Image entries stream out of the zip after the manifest, so image items materialize only
         // now that their files exist; the recorded index restores each one's z-order slot.
-        for ((page, specs) in m.pageImages) {
+        for ((page, specs, glue) in m.pageImages) {
             var dropped = 0
             for (spec in specs) {
                 val item = materializeImage(spec, imageFiles)
-                if (item == null) dropped++ else page.items.add(spec.index - dropped, item)
+                if (item == null) {
+                    dropped++
+                } else {
+                    page.items.add(spec.index - dropped, item)
+                    glue.named(item, spec.id)
+                }
             }
         }
+        // Every page's items are in, so connectors can glue to whatever their ends name.
+        for (glue in m.pageGlue) glue.resolve()
 
         // Ink written before pen-up sample reduction shipped (writer < 43, or no writer field at
         // all) carries far more samples than the ribbon needs; compact it once at load. In-memory
@@ -516,7 +699,8 @@ class DocumentCodec(
         var margins = PageMargins()
         val bookmarks = ArrayList<Bookmark>()
         val pages = ArrayList<Page>()
-        val pageImages = ArrayList<Pair<Page, List<PendingImage>>>()
+        val pageImages = ArrayList<Triple<Page, List<PendingImage>, GlueRead>>()
+        val pageGlue = ArrayList<GlueRead>()
     }
 
     /** An image item parsed before its asset entry has streamed out of the zip. */
@@ -529,6 +713,7 @@ class DocumentCodec(
         val orientation: Int,
         val angle: Double,
         val locked: Boolean,
+        val id: Int?,
     )
 
     /** [peek] for a note that only comes as a stream: reads through to the manifest, skipping what comes before it. */
@@ -634,6 +819,7 @@ class DocumentCodec(
             var margins = PageMargins()
             val items = mutableListOf<CanvasItem>()
             val pending = ArrayList<PendingImage>()
+            val glue = GlueRead()
             p.beginObject()
             while (p.hasNext()) {
                 when (p.nextName()) {
@@ -642,22 +828,30 @@ class DocumentCodec(
                     "pdf_page" -> pdfPage = intOrNull(p)
                     "style" -> style = parseStyle(p)
                     "margins" -> margins = parseMargins(p)
-                    "items" -> parseItems(p, items, pending)
+                    "items" -> parseItems(p, items, pending, glue)
                     else -> p.skipValue()
                 }
             }
             p.endObject()
+            if (!(width > 0.0 && width.isFinite() && height > 0.0 && height.isFinite())) {
+                // a page with no area (a broken PDF page from an older import) takes its neighbour's size
+                val prev = m.pages.lastOrNull()
+                width = prev?.width ?: fallbackW
+                height = prev?.height ?: fallbackH
+                pdfPage = null
+            }
             val page = Page(width = width, height = height, items = items, pdfPage = pdfPage, style = style, margins = margins)
             m.pages.add(page)
-            if (pending.isNotEmpty()) m.pageImages.add(page to pending)
+            m.pageGlue.add(glue)
+            if (pending.isNotEmpty()) m.pageImages.add(Triple(page, pending, glue))
         }
         p.endArray()
     }
 
-    private fun parseItems(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>) {
+    private fun parseItems(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>, glue: GlueRead) {
         if (p.peek() != JsonPull.Token.BEGIN_ARRAY) return p.skipValue()
         p.beginArray()
-        while (p.hasNext()) parseItem(p, items, pending)
+        while (p.hasNext()) parseItem(p, items, pending, glue)
         p.endArray()
     }
 
@@ -665,6 +859,8 @@ class DocumentCodec(
     private class ItemScratch {
         var locked = false
         var kind: String? = null
+        var id: Int? = null
+        var connector: ConnectorScratch? = null
         var tool: String? = null
         var config: ConfigScratch? = null
         var samples: RawSamples? = null
@@ -685,6 +881,13 @@ class DocumentCodec(
         var pointSize = TextItem.DEFAULT_POINT_SIZE
         var fontFace = ""
         var shape: String? = null
+        var geom: String? = null
+        var path: String? = null
+        var adj: DoubleArray? = null
+        var n = 0
+        var headStart: String? = null
+        var headEnd: String? = null
+        var label: LabelScratch? = null
         var start: Pt? = null
         var end: Pt? = null
         var strokeRgba: Rgba? = null
@@ -717,13 +920,15 @@ class DocumentCodec(
         var highlighterInverse: Boolean? = null
     }
 
-    private fun parseItem(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>) {
+    private fun parseItem(p: JsonPull, items: MutableList<CanvasItem>, pending: MutableList<PendingImage>, glue: GlueRead) {
         if (p.peek() != JsonPull.Token.BEGIN_OBJECT) return p.skipValue()
         val s = ItemScratch()
         p.beginObject()
         while (p.hasNext()) {
             when (p.nextName()) {
                 "kind" -> s.kind = stringOr(p, "")
+                "id" -> s.id = intOrNull(p)
+                "connector" -> s.connector = parseConnector(p)
                 "tool" -> s.tool = stringOr(p, "")
                 "config" -> s.config = parseConfig(p)
                 "samples" -> s.samples = parseSamples(p)
@@ -744,6 +949,13 @@ class DocumentCodec(
                 "point_size" -> s.pointSize = doubleOr(p, TextItem.DEFAULT_POINT_SIZE)
                 "font_face" -> s.fontFace = stringOr(p, "")
                 "shape" -> s.shape = stringOr(p, "")
+                "geom" -> s.geom = stringOrNull(p)
+                "path" -> s.path = stringOrNull(p)
+                "adj" -> s.adj = doublesOrNull(p)
+                "n" -> s.n = intOr(p, 0)
+                "head_start" -> s.headStart = stringOrNull(p)
+                "head_end" -> s.headEnd = stringOrNull(p)
+                "label" -> s.label = parseLabel(p)
                 "start" -> s.start = ptOrNull(p)
                 "end" -> s.end = ptOrNull(p)
                 "stroke_rgba" -> s.strokeRgba = rgbaOrNull(p)
@@ -769,7 +981,7 @@ class DocumentCodec(
                     pending.add(
                         PendingImage(
                             items.size + pending.size, asset, s.rect, s.srcW, s.srcH,
-                            s.orientation, s.angle, s.locked,
+                            s.orientation, s.angle, s.locked, s.id,
                         ),
                     )
                 }
@@ -786,9 +998,13 @@ class DocumentCodec(
                     measurer = textMeasurer,
                 ),
             )
-            ShapeItem.KIND -> items.add(buildShape(s))
+            ShapeItem.KIND, ShapeItem.GLYPHS_KIND -> {
+                val c = s.connector
+                items.add(if (c != null && s.kind == ShapeItem.KIND) buildConnector(s, c, glue) else buildShape(s))
+            }
             else -> {} // unrecognized kind: skipped (forgiving)
         }
+        if (items.size > before) glue.named(items[before], s.id)
         // Absent on every note written before locking existed, which reads back as unlocked.
         if (s.locked && items.size > before) items[before].locked = true
     }
@@ -805,9 +1021,8 @@ class DocumentCodec(
             rgba = c?.rgba ?: def.rgba,
             speedStrength = c?.speedStrength ?: def.speedStrength,
             taperEnabled = c?.let { it.taperEnabled ?: ((it.taperLength ?: 0.0) > 0.0) } ?: def.taperEnabled,
-            // Absent on legacy taper strokes -> the current default tip, so old tapers reload
-            // tapered rather than as a sharp point.
-            taperMinFactor = c?.taperMinFactor ?: ToolDefaults.DEFAULT_TAPER_TIP,
+            // Absent on legacy taper strokes -> the legacy tip, so old tapers reload tapered.
+            taperMinFactor = c?.taperMinFactor ?: ToolDefaults.LEGACY_TAPER_TIP,
             neon = c?.neon ?: def.neon,
             neonStrength = c?.neonStrength ?: def.neonStrength,
             dashLength = c?.dashLength ?: def.dashLength,
@@ -822,6 +1037,148 @@ class DocumentCodec(
     }
 
     private fun buildShape(s: ItemScratch): ShapeItem {
+        val shape = buildDrawnShape(s)
+        // The real geometry behind a stand-in polygon; or else an old file's baked turn.
+        val frame = s.rect
+        if (frame != null && (s.geom != null || s.angle != 0.0 || s.path != null)) {
+            shape.restoreFrame(ShapeKind.fromIdOrNull(s.geom), frame, s.angle, FreePath.fromSvg(s.path))
+        } else {
+            shape.unbake()
+        }
+        if (s.n > 0) shape.n = s.n
+        s.adj?.let { shape.adj = it }
+        s.headStart?.let { shape.headStart = Head.fromId(it) }
+        s.headEnd?.let { shape.headEnd = Head.fromId(it) }
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            shape.label = ShapeLabel(l.text, TextStyle(l.rgba ?: shape.strokeRgba, l.pointSize, FontFace.fromId(l.fontFace)), textMeasurer)
+            l.at?.takeIf { it.isFinite() }?.let { shape.labelAt = it.coerceIn(0.0, 1.0) }
+        }
+        return shape
+    }
+
+    private class LabelScratch {
+        var text = ""
+        var rgba: Rgba? = null
+        var pointSize = TextItem.DEFAULT_POINT_SIZE
+        var fontFace = ""
+        var at: Double? = null
+    }
+
+    private fun parseLabel(p: JsonPull): LabelScratch? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        val l = LabelScratch()
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "text" -> l.text = stringOr(p, "")
+                "rgba" -> l.rgba = rgbaOrNull(p)
+                "point_size" -> l.pointSize = doubleOr(p, TextItem.DEFAULT_POINT_SIZE)
+                "font_face" -> l.fontFace = stringOr(p, "")
+                "at" -> l.at = doubleOrNull(p)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return l
+    }
+
+    private class ConnectorScratch {
+        var routing: String? = null
+        var from: EndRead? = null
+        var to: EndRead? = null
+        var axis: String? = null
+        var coords: DoubleArray? = null
+        var waypoints: List<Pt>? = null
+    }
+
+    private fun parseConnector(p: JsonPull): ConnectorScratch? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        val c = ConnectorScratch()
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "routing" -> c.routing = stringOrNull(p)
+                "from" -> c.from = parseEnd(p)
+                "to" -> c.to = parseEnd(p)
+                "axis" -> c.axis = stringOrNull(p)
+                "coords" -> c.coords = doublesOrNull(p)
+                "waypoints" -> c.waypoints = anyPoints(p)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return c
+    }
+
+    /** Every point of an array, however few: a straight connector may bend just once. */
+    private fun anyPoints(p: JsonPull): List<Pt>? {
+        if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
+            p.skipValue()
+            return null
+        }
+        val out = ArrayList<Pt>()
+        p.beginArray()
+        while (p.hasNext()) ptOrNull(p)?.let { out.add(it) }
+        p.endArray()
+        return out
+    }
+
+    private fun parseEnd(p: JsonPull): EndRead? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        var at: Pt? = null
+        var id: Int? = null
+        var point = -1
+        p.beginObject()
+        while (p.hasNext()) {
+            when (p.nextName()) {
+                "at" -> at = ptOrNull(p)
+                "item" -> id = intOrNull(p)
+                "point" -> point = intOr(p, -1)
+                else -> p.skipValue()
+            }
+        }
+        p.endObject()
+        return EndRead(at, id, point)
+    }
+
+    /**
+     * A connector from its stand-in polyline's fields and its own. Its ends stay loose until the
+     * page's items are all read and [glue] can find what they name; a routing this version does not
+     * know draws as the line the stand-in runs along.
+     */
+    private fun buildConnector(s: ItemScratch, cs: ConnectorScratch, glue: GlueRead): ConnectorItem {
+        val pts = s.points.orEmpty()
+        val from = cs.from?.at ?: pts.firstOrNull() ?: s.start ?: Pt.ZERO
+        val to = cs.to?.at ?: pts.lastOrNull() ?: s.end ?: Pt.ZERO
+        val known = Routing.fromId(cs.routing)
+        val c = ConnectorItem(
+            known ?: Routing.STRAIGHT, ConnectorEnd(from), ConnectorEnd(to), s.strokeRgba ?: Rgba(0, 230, 118, 255), s.strokeWidth,
+            Head.fromId(s.headStart), Head.fromId(s.headEnd), s.dashed, s.dashLength, s.dashGap, s.neon, s.neonStrength,
+        )
+        val coords = cs.coords?.takeIf { v -> v.all { it.isFinite() } }
+        when {
+            known == null -> c.waypoints = pts.drop(1).dropLast(1)
+            known.orthogonal -> c.elbow = coords?.let { Elbow(if (cs.axis == "v") Axis.V else Axis.H, it) } ?: Elbow.of(pts.ifEmpty { listOf(from, to) })
+            else -> c.waypoints = cs.waypoints.orEmpty()
+        }
+        s.label?.takeIf { it.text.isNotEmpty() }?.let { l ->
+            c.label = ShapeLabel(l.text, TextStyle(l.rgba ?: c.strokeRgba, l.pointSize, FontFace.fromId(l.fontFace)), textMeasurer)
+            l.at?.takeIf { it.isFinite() }?.let { c.labelAt = it.coerceIn(0.0, 1.0) }
+        }
+        glue.waiting(c, cs.from, cs.to)
+        return c
+    }
+
+    private fun buildDrawnShape(s: ItemScratch): ShapeItem {
         val kind = ShapeKind.fromId(s.shape)
         val strokeRgba = s.strokeRgba ?: Rgba(0, 230, 118, 255)
         s.points?.let { verts ->
@@ -910,21 +1267,52 @@ class DocumentCodec(
             return PageStyle()
         }
         var pageColor: Rgba? = null
-        var pattern: PagePattern? = null
+        var pattern: String? = null
+        var template: String? = null
         var patternColor: Rgba? = null
         var spacing: Double? = null
+        var accent: Rgba? = null
+        var params: Map<String, Double>? = null
+        var colors: Map<String, Rgba>? = null
         p.beginObject()
         while (p.hasNext()) {
             when (p.nextName()) {
                 "page_color" -> pageColor = rgbaOrNull(p)
-                "pattern" -> pattern = PagePattern.fromId(stringOrNull(p))
+                "pattern" -> pattern = PagePattern.fromId(stringOrNull(p))?.id
+                "template" -> template = stringOrNull(p)?.takeIf { TEMPLATE_KEY.matches(it) }
                 "pattern_color" -> patternColor = rgbaOrNull(p)
                 "spacing" -> spacing = doubleOrNull(p)
+                "accent_color" -> accent = rgbaOrNull(p)
+                "params" -> params = namedValues(p) { doubleOrNull(it) }
+                "colors" -> colors = namedValues(p) { rgbaOrNull(it) }
                 else -> p.skipValue()
             }
         }
         p.endObject()
-        return PageStyle(pageColor = pageColor, pattern = pattern, patternColor = patternColor, spacing = spacing)
+        return PageStyle(
+            pageColor = pageColor,
+            template = template ?: pattern,
+            patternColor = patternColor,
+            spacing = spacing,
+            accentColor = accent,
+            params = params,
+            colors = colors,
+        )
+    }
+
+    private fun <T> namedValues(p: JsonPull, value: (JsonPull) -> T?): Map<String, T>? {
+        if (p.peek() != JsonPull.Token.BEGIN_OBJECT) {
+            p.skipValue()
+            return null
+        }
+        val out = LinkedHashMap<String, T>()
+        p.beginObject()
+        while (p.hasNext()) {
+            val k = p.nextName()
+            value(p)?.let { out[k] = it }
+        }
+        p.endObject()
+        return out.takeIf { it.isNotEmpty() }
     }
 
     private fun parseMargins(p: JsonPull): PageMargins {
@@ -1065,6 +1453,18 @@ class DocumentCodec(
         return if (count >= 4) Rect(v[0], v[1], v[2], v[3]) else null
     }
 
+    private fun doublesOrNull(p: JsonPull): DoubleArray? {
+        if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
+            p.skipValue()
+            return null
+        }
+        val out = ArrayList<Double>()
+        p.beginArray()
+        while (p.hasNext()) doubleOrNull(p)?.takeIf { it.isFinite() }?.let { out.add(it) }
+        p.endArray()
+        return out.toDoubleArray()
+    }
+
     private fun pointsOrNull(p: JsonPull): List<Pt>? {
         if (p.peek() != JsonPull.Token.BEGIN_ARRAY) {
             p.skipValue()
@@ -1090,11 +1490,30 @@ class DocumentCodec(
         private const val SIMPLIFIED_SINCE = 43
 
         private const val NOT_XNOTE = "Not an xnotes document"
+
+        /** How closely a curved connector's stand-in polyline follows it, in content px. */
+        private const val STAND_IN_FLATTEN = 0.25
+
+        private const val TEMPLATE_DIR = "templates/"
+        private const val TEMPLATE_EXT = ".xtemplate"
+
+        /** What a template key may look like: it becomes part of a zip entry name. */
+        val TEMPLATE_KEY = Regex("[A-Za-z0-9._-]{1,64}")
     }
 }
 
 /** What the explorer shows about a note without loading it. */
 class NotePeek(val pages: Int, val hasPdf: Boolean, val created: Long?)
+
+/** Up to [limit] bytes of [input], or null when it holds more (the rest is left unread). */
+private fun readAtMost(input: InputStream, limit: Int): ByteArray? {
+    val source = input.asSource()
+    val out = okio.Buffer()
+    while (true) {
+        if (source.read(out, 16L * 1024) < 0) return out.readByteArray()
+        if (out.size > limit) return null
+    }
+}
 
 private fun ZipOutputStream.putDeflated(name: String, data: ByteArray) {
     val entry = ZipEntry(name).apply { setMethod(ZipMethod.DEFLATED) }

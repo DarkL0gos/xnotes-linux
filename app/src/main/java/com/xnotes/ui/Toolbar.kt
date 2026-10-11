@@ -165,6 +165,8 @@ private fun ToolbarItemView(
     when (item) {
         // Canvas-only items; a stored paged layout can never hold one, so nothing is drawn.
         ToolbarItem.WAYPOINTS, ToolbarItem.MINIMAP -> Unit
+        // The PDF text markup tool is the original app's; this build draws no button for it.
+        ToolbarItem.MARKUP -> Unit
 
         ToolbarItem.HOME -> ToolbarIcon(XnotesIcons.prev, stringResource(R.string.toolbar_home)) { onOpenBackstage() }
         ToolbarItem.TITLE -> Label(

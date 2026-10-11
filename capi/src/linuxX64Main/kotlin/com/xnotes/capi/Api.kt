@@ -51,7 +51,7 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import com.xnotes.core.model.DrawStyle
 import com.xnotes.core.model.Rgba
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapePresets
 import com.xnotes.core.pal.FontSpec
 import com.xnotes.core.pal.ImageCodec
 import com.xnotes.core.pal.ImageSize
@@ -166,7 +166,8 @@ internal class CCanvasNote(val canvas: InfiniteDocument)
 
 private fun isCanvasPath(path: String) = path.lowercase().endsWith("." + InfiniteDocument.EXTENSION)
 
-private fun canvasCodecFor(host: CPointer<xn_host>?) = CanvasCodec(if (host == null) NoImageCodec else CImageCodec(host.pointed))
+private fun canvasCodecFor(host: CPointer<xn_host>?) =
+    CanvasCodec(if (host == null) NoImageCodec else CImageCodec(host.pointed), if (host == null) NoTextMeasurer else CTextMeasurer(host.pointed))
 
 /*
  * A note handle holds a paged note (CNote) or an infinite canvas (CCanvasNote), an editor handle a
@@ -696,7 +697,7 @@ private val CANVAS_TOOLS = setOf(
 private const val CANVAS_ZOOM_STEP = 1.25
 
 internal fun shapeConfigOf(s: xn_shape_style, current: ShapeConfig): ShapeConfig = current.copy(
-    shape = ShapeKind.entries.firstOrNull { it.id == s.kind?.toKString() } ?: current.shape,
+    preset = s.kind?.toKString()?.takeIf { ShapePresets.byKey(it) != null } ?: current.preset,
     strokeWidth = s.width.coerceIn(DrawStyle.MIN_WIDTH, DrawStyle.MAX_WIDTH),
     fill = s.fill != 0,
     fillAlpha = s.fill_alpha.coerceIn(ShapeConfig.FILL_ALPHA_MIN, ShapeConfig.FILL_ALPHA_MAX),
@@ -992,7 +993,8 @@ fun xnEditorPageStyle(editor: COpaquePointer?, allPages: Int, out: CPointer<xn_p
     val o = out!!.pointed
     o.has_page_color = if (st.pageColor != null) 1 else 0
     o.page_color = st.pageColor?.packed() ?: 0u
-    o.pattern = st.pattern?.let { PagePattern.entries.indexOf(it) } ?: -1
+    // The C API names the built-in rulings; any other template reads as inherited.
+    o.pattern = st.template?.let { t -> PagePattern.fromId(t)?.let { PagePattern.entries.indexOf(it) } } ?: -1
     o.has_pattern_color = if (st.patternColor != null) 1 else 0
     o.pattern_color = st.patternColor?.packed() ?: 0u
     o.spacing = st.spacing ?: 0.0
@@ -1008,7 +1010,7 @@ fun xnEditorSetPageStyle(editor: COpaquePointer?, allPages: Int, style: CPointer
     val s = style!!.pointed
     val next = PageStyle(
         pageColor = if (s.has_page_color != 0) unpack(s.page_color) else null,
-        pattern = PagePattern.entries.getOrNull(s.pattern),
+        template = PagePattern.entries.getOrNull(s.pattern)?.id,
         patternColor = if (s.has_pattern_color != 0) unpack(s.pattern_color) else null,
         spacing = s.spacing.takeIf { it > 0.0 }?.coerceIn(PageStyle.MIN_SPACING, PageStyle.MAX_SPACING),
     )
@@ -1190,6 +1192,7 @@ internal fun fillField(f: xn_text_field, field: EditingField) {
     f.face_len = 0
     f.text = null
     f.text_len = 0
+    f.centred = if (field.centred) 1 else 0
 }
 
 @CName("xn_editor_text_field")

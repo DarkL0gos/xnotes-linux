@@ -4,6 +4,7 @@ import com.xnotes.core.model.Rgba
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -92,5 +93,41 @@ class TextFlowTest {
         assertEquals(FlowRange(a, b), FlowRange(b, a).normalized())
         assertTrue(FlowRange.caret(a).collapsed)
         assertTrue(a < b)
+    }
+
+    @Test
+    fun everyHeadingLevelIsBiggerThanTheNextAndBiggerThanBody() {
+        // h5 and h6 both sat at body size once, which made three levels look alike.
+        val body = TextFlow.DEFAULT_SIZE_PT
+        val sizes = (1..Paragraph.MAX_HEADING).map { Paragraph.headingSizePt(it, body) }
+        for (i in 0 until sizes.size - 1) {
+            assertTrue("h${i + 1} vs h${i + 2}", sizes[i] > sizes[i + 1])
+        }
+        assertTrue(sizes.last() > body)
+        assertEquals(2.0 * body, sizes.first(), 1e-9)
+    }
+
+    @Test
+    fun factorySizeIsInverselyProportionalToTheScreensShorterSide() {
+        // A Galaxy Tab S9 FE (1440px at 280dpi) and a Galaxy A14 (1080px at 420dpi).
+        assertEquals(12.0, FlowDefaults.sizeForScreen(1440 * 160 / 280.0), 0.0)
+        assertEquals(24.0, FlowDefaults.sizeForScreen(1080 * 160 / 420.0), 0.0)
+        assertEquals(8.0, FlowDefaults.sizeForScreen(823.0 * 1.5), 0.0)
+        assertEquals(6.0, FlowDefaults.sizeForScreen(5000.0), 0.0)
+        assertEquals(36.0, FlowDefaults.sizeForScreen(100.0), 0.0)
+        assertEquals(TextFlow.DEFAULT_SIZE_PT, FlowDefaults.sizeForScreen(0.0), 0.0)
+    }
+
+    @Test
+    fun headingsAreBoldAndScaleWithTheFlowsBaseSize() {
+        val flow = TextFlow().apply { defaultSizePt = 10.0 }
+        val heading = Paragraph(headingLevel = 3)
+        val small = heading.textSizePt(flow)
+        flow.defaultSizePt = 20.0
+        assertEquals(2.0, heading.textSizePt(flow) / small, 1e-9)
+        assertEquals(20.0, Paragraph().textSizePt(flow), 0.0)
+        // The level sizes a heading's text, so its own style leaves the size unset.
+        assertTrue(Paragraph.HEADING_STYLE.bold)
+        assertNull(Paragraph.HEADING_STYLE.sizePt)
     }
 }

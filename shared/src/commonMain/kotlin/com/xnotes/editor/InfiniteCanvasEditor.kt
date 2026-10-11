@@ -124,7 +124,7 @@ class InfiniteCanvasEditor(
     // --- what the overlays draw ---
 
     private var wetStroke: Stroke? = null
-    private var pendingShape: ShapeItem? = null
+    private var pendingShape: CanvasItem? = null
     private var lifted: List<CanvasItem> = emptyList()
     private var lift: LiftTransform = LiftTransform.NONE
     private var eraserAt: Pt? = null

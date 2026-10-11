@@ -34,6 +34,33 @@ object OverlayTessellator {
     /** Band and lasso outline thickness, in device pixels. */
     const val MARQUEE_PX = 1.4
 
+    /** How far a lone shape's chrome sits outside its outline, in device pixels. */
+    const val FRAME_MARGIN_PX = 14.0
+
+    /** Vertex dot diameter and the light core inside it, in device pixels. */
+    const val VERTEX_DOT_PX = 12.0
+    const val VERTEX_CORE_PX = 6.0
+
+    /** Edge midpoint dot diameter, in device pixels. */
+    const val EDGE_DOT_PX = 9.0
+
+    /** An edge shorter than this on screen shows no midpoint dot, in device pixels. */
+    const val EDGE_DOT_MIN_PX = 48.0
+
+    /** How close a press has to land to a dot to grab it, in device pixels. */
+    const val DOT_TOUCH_PX = 20.0
+
+    /** A knob diamond's diagonal and its edge, in device pixels: big enough to stand out among the dots. */
+    const val KNOB_PX = 22.0
+    const val KNOB_EDGE_PX = 1.5
+
+    /** Knobs are amber, PowerPoint's colour for them, so they never read as a handle or a vertex. */
+    val KNOB_FILL = Rgba(255, 196, 0, 255)
+    val KNOB_EDGE = Rgba(110, 72, 0, 255)
+
+    /** A knob diamond centred on [c] with half-diagonal [r]. */
+    fun knobDiamond(c: Pt, r: Double): List<Pt> = listOf(Pt(c.x, c.y - r), Pt(c.x + r, c.y), Pt(c.x, c.y + r), Pt(c.x - r, c.y))
+
     /**
      * Dash on/off runs for every marquee, in dp, so chrome reads the same on any screen. Both
      * canvases draw from these, which is what keeps a band, a lasso and a selection box looking
@@ -42,13 +69,21 @@ object OverlayTessellator {
     const val DASH_ON_DP = 8.0
     const val DASH_GAP_DP = 5.0
 
-    /** The selection box, its eight handles and the rotate grip and its stem. */
+    /**
+     * The selection box, its handles (all eight unless [handles] names fewer), the rotate grip and
+     * its stem, and over a lone shape the dots that edit its points: faint ones halfway along each
+     * edge, solid ones on the vertices.
+     */
     fun selection(
         box: Obb,
         zoom: Double,
         accent: Rgba,
         tolerance: Double,
         devicePxPerDp: Double = 1.0,
+        handles: List<Pt>? = null,
+        vertexDots: List<Pt> = emptyList(),
+        edgeDots: List<Pt> = emptyList(),
+        knobs: List<Pt> = emptyList(),
     ): List<MeshPart> {
         if (zoom <= 0.0) return emptyList()
         val outline = MeshBuilder()
@@ -64,14 +99,126 @@ object OverlayTessellator {
 
         val marks = MeshBuilder()
         val handleHalf = HANDLE_PX / zoom / 2.0
-        for (handle in com.xnotes.canvas.ResizeMath.obbHandles(box)) {
-            marks.rect(handle.content.x - handleHalf, handle.content.y - handleHalf, handleHalf * 2, handleHalf * 2)
+        for (c in handles ?: com.xnotes.canvas.ResizeMath.obbHandles(box).map { it.content }) {
+            marks.rect(c.x - handleHalf, c.y - handleHalf, handleHalf * 2, handleHalf * 2)
         }
         marks.circle(grip.x, grip.y, GRIP_PX / zoom / 2.0, tolerance)
 
-        val parts = ArrayList<MeshPart>(2)
+        val parts = ArrayList<MeshPart>(5)
         if (!outline.isEmpty) parts.add(MeshPart(outline.build(), accent, InkPass.OPAQUE))
         if (!marks.isEmpty) parts.add(MeshPart(marks.build(), accent, InkPass.OPAQUE))
+        if (edgeDots.isNotEmpty()) {
+            val faint = MeshBuilder()
+            for (d in edgeDots) faint.circle(d.x, d.y, EDGE_DOT_PX / zoom / 2.0, tolerance)
+            parts.add(MeshPart(faint.build(), accent.withAlpha(EDGE_DOT_ALPHA), InkPass.OPAQUE))
+        }
+        if (vertexDots.isNotEmpty()) {
+            val dots = MeshBuilder()
+            val cores = MeshBuilder()
+            for (d in vertexDots) {
+                dots.circle(d.x, d.y, VERTEX_DOT_PX / zoom / 2.0, tolerance)
+                cores.circle(d.x, d.y, VERTEX_CORE_PX / zoom / 2.0, tolerance)
+            }
+            parts.add(MeshPart(dots.build(), accent, InkPass.OPAQUE))
+            parts.add(MeshPart(cores.build(), DOT_CORE, InkPass.OPAQUE))
+        }
+        if (knobs.isNotEmpty()) {
+            val fill = MeshBuilder()
+            val edge = MeshBuilder()
+            for (k in knobs) {
+                val d = knobDiamond(k, KNOB_PX / zoom / 2.0)
+                val v = d.map { fill.vertex(it.x, it.y) }
+                fill.triangle(v[0], v[1], v[2])
+                fill.triangle(v[0], v[2], v[3])
+                edge.polylineRibbon(d, KNOB_EDGE_PX / zoom / 2.0, closed = true, tolerance = tolerance)
+            }
+            parts.add(MeshPart(fill.build(), KNOB_FILL, InkPass.OPAQUE))
+            parts.add(MeshPart(edge.build(), KNOB_EDGE, InkPass.OPAQUE))
+        }
+        return parts
+    }
+
+    /** A connection point's cross, end to end, and its line, in device pixels. */
+    const val MARK_PX = 9.0
+    const val MARK_LINE_PX = 1.4
+
+    /** The ring round the connection point a pen is over, in device pixels. */
+    const val HOT_PX = 15.0
+    const val HOT_CORE_PX = 7.0
+
+    /**
+     * Where a connector can glue, while one is armed: a small cross on every point in [points], and
+     * a solid ring on each of [hot], the points under the pen and the one a connector set off from.
+     */
+    fun connectionMarks(points: List<Pt>, hot: List<Pt>, zoom: Double, accent: Rgba, tolerance: Double): List<MeshPart> {
+        if (zoom <= 0.0) return emptyList()
+        val parts = ArrayList<MeshPart>(3)
+        if (points.isNotEmpty()) {
+            val b = MeshBuilder()
+            val r = MARK_PX / zoom / 2.0
+            val half = MARK_LINE_PX / zoom / 2.0
+            for (p in points) {
+                b.polylineRibbon(listOf(Pt(p.x - r, p.y - r), Pt(p.x + r, p.y + r)), half, closed = false, tolerance = tolerance)
+                b.polylineRibbon(listOf(Pt(p.x - r, p.y + r), Pt(p.x + r, p.y - r)), half, closed = false, tolerance = tolerance)
+            }
+            parts.add(MeshPart(b.build(), accent, InkPass.OPAQUE))
+        }
+        if (hot.isNotEmpty()) {
+            val rings = MeshBuilder()
+            val cores = MeshBuilder()
+            for (h in hot) {
+                rings.circle(h.x, h.y, HOT_PX / zoom / 2.0, tolerance)
+                cores.circle(h.x, h.y, HOT_CORE_PX / zoom / 2.0, tolerance)
+            }
+            parts.add(MeshPart(rings.build(), accent, InkPass.OPAQUE))
+            parts.add(MeshPart(cores.build(), DOT_CORE, InkPass.OPAQUE))
+        }
+        return parts
+    }
+
+    /** A lone connector's end dot, and the light core that marks a loose end, in device pixels. */
+    const val END_PX = 14.0
+    const val END_CORE_PX = 7.0
+
+    /**
+     * A lone selected connector's chrome, standing in for a box: a dot on each end (solid when
+     * glued, hollow when loose), a square on each middle segment it can slide, and on a straight
+     * one a dot on each waypoint and a faint one halfway along each stretch, where a drag adds one.
+     */
+    fun connectorChrome(
+        ends: List<Pair<Pt, Boolean>>,
+        segments: List<Pt>,
+        waypoints: List<Pt>,
+        midpoints: List<Pt>,
+        zoom: Double,
+        accent: Rgba,
+        tolerance: Double,
+    ): List<MeshPart> {
+        if (zoom <= 0.0) return emptyList()
+        val parts = ArrayList<MeshPart>(6)
+        if (midpoints.isNotEmpty()) {
+            val faint = MeshBuilder()
+            for (d in midpoints) faint.circle(d.x, d.y, EDGE_DOT_PX / zoom / 2.0, tolerance)
+            parts.add(MeshPart(faint.build(), accent.withAlpha(EDGE_DOT_ALPHA), InkPass.OPAQUE))
+        }
+        if (segments.isNotEmpty()) {
+            val squares = MeshBuilder()
+            val half = HANDLE_PX / zoom / 2.0
+            for (c in segments) squares.rect(c.x - half, c.y - half, half * 2, half * 2)
+            parts.add(MeshPart(squares.build(), accent, InkPass.OPAQUE))
+        }
+        val dots = MeshBuilder()
+        val cores = MeshBuilder()
+        for (d in waypoints) {
+            dots.circle(d.x, d.y, VERTEX_DOT_PX / zoom / 2.0, tolerance)
+            cores.circle(d.x, d.y, VERTEX_CORE_PX / zoom / 2.0, tolerance)
+        }
+        for ((at, glued) in ends) {
+            dots.circle(at.x, at.y, END_PX / zoom / 2.0, tolerance)
+            if (!glued) cores.circle(at.x, at.y, END_CORE_PX / zoom / 2.0, tolerance)
+        }
+        if (!dots.isEmpty) parts.add(MeshPart(dots.build(), accent, InkPass.OPAQUE))
+        if (!cores.isEmpty) parts.add(MeshPart(cores.build(), DOT_CORE, InkPass.OPAQUE))
         return parts
     }
 
@@ -175,6 +322,12 @@ object OverlayTessellator {
     }
 
     /** Content-space bounds of an oriented box grown by its handles and grip, for the cover quad. */
+    /** Edge dots read as a hint beside the solid vertex dots. */
+    private const val EDGE_DOT_ALPHA = 140
+
+    /** The light core that makes a vertex dot read as a point rather than a handle. */
+    val DOT_CORE = Rgba(255, 255, 255, 255)
+
     fun selectionBounds(box: Obb, zoom: Double): Rect {
         val pad = (GRIP_ARM_PX + GRIP_PX + HANDLE_PX) / maxOf(zoom, 1e-9)
         var acc = Rect.bounding(box.corners())

@@ -1,5 +1,9 @@
 package com.xnotes.canvas
 
+import com.xnotes.core.platform.roundHalfUp
+import kotlin.math.PI
+import com.xnotes.core.geometry.toDegrees
+import com.xnotes.core.geometry.toRadians
 import com.xnotes.core.geometry.Affine
 import com.xnotes.core.geometry.Obb
 import com.xnotes.core.geometry.Pt
@@ -9,7 +13,10 @@ import com.xnotes.core.model.ImageItem
 import com.xnotes.core.model.ShapeItem
 import com.xnotes.core.model.TextItem
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.sin
 
 /** Which resize handle is being dragged (spec 06 §8). T/B are the top/bottom side mid-handles. */
 enum class HandleId { TL, TR, BL, BR, L, R, T, B, START, END }
@@ -124,6 +131,31 @@ object ResizeMath {
     }
 
     /**
+     * As [obbResize], for handles drawn [margin] outside the box that scales: a lone shape's frame,
+     * whose chrome sits past its outline. The pointer is read as if pulled back by the margin, so
+     * the box edge stays exactly the margin behind the finger rather than scaling the gap.
+     */
+    fun obbResize(obb: Obb, handle: HandleId, pointer: Pt, margin: Double): ObbResize {
+        if (margin <= 0.0) return obbResize(obb, handle, pointer)
+        val local = obb.worldToLocal(pointer)
+        val dir = handleDirection(handle)
+        return obbResize(obb, handle, obb.localToWorld(Pt(local.x - dir.x * margin, local.y - dir.y * margin)))
+    }
+
+    /** Which way a handle sits from the box centre, one unit per axis it moves along. */
+    fun handleDirection(handle: HandleId): Pt = when (handle) {
+        HandleId.TL -> Pt(-1.0, -1.0)
+        HandleId.TR -> Pt(1.0, -1.0)
+        HandleId.BL -> Pt(-1.0, 1.0)
+        HandleId.BR -> Pt(1.0, 1.0)
+        HandleId.L -> Pt(-1.0, 0.0)
+        HandleId.R -> Pt(1.0, 0.0)
+        HandleId.T -> Pt(0.0, -1.0)
+        HandleId.B -> Pt(0.0, 1.0)
+        else -> Pt.ZERO
+    }
+
+    /**
      * The scale a box-handle drag produces: a corner scales both axes by one factor (aspect-locked,
      * anchored at the opposite corner); an edge scales a single axis (anchored at the opposite
      * edge). Each axis is floored positive so the box can't shrink past [MIN_SIZE] or flip.
@@ -216,6 +248,55 @@ object ResizeMath {
         val sx = if (pointer.x >= anchor.x) 1.0 else -1.0
         val sy = if (pointer.y >= anchor.y) 1.0 else -1.0
         return anchor to Pt(anchor.x + sx * side, anchor.y + sy * side)
+    }
+
+    /** A shape being drawn out puts its far end here for [pen]; [perfect] (the shape tool's Perfect
+     *  switch) steps a line or arrow's angle and gives anything else its kind's perfect proportions. */
+    fun drawnEnd(shape: ShapeItem, pen: Pt, perfect: Boolean): Pt {
+        val kind = shape.shape
+        return when {
+            kind.isEndpointShape && perfect -> stepAngle(shape.start, pen, InteractionController.SHAPE_PERFECT_STEP_DEG)
+            kind.isEndpointShape -> snapAxis(shape.start, pen)
+            perfect -> aspectCorner(shape.start, pen, kind.perfectAspect(shape.n))
+            kind.keepsAspect -> aspectCorner(shape.start, pen, 1.0)
+            else -> pen
+        }
+    }
+
+    /** [p] pinned to an exact horizontal or vertical run from [anchor] when it lands within
+     *  [InteractionController.SHAPE_AXIS_SNAP_DEG] of one (mirrors the recognizer's axis snap). */
+    fun snapAxis(anchor: Pt, p: Pt): Pt {
+        val dx = p.x - anchor.x
+        val dy = p.y - anchor.y
+        if (dx == 0.0 && dy == 0.0) return p
+        val snap = toRadians(InteractionController.SHAPE_AXIS_SNAP_DEG)
+        val fromHoriz = atan2(abs(dy), abs(dx)) // 0 = horizontal, PI/2 = vertical
+        return when {
+            fromHoriz <= snap -> Pt(p.x, anchor.y)
+            fromHoriz >= PI / 2.0 - snap -> Pt(anchor.x, p.y)
+            else -> p
+        }
+    }
+
+    /** [p] turned about [anchor] onto the nearest whole step of [stepDeg], as far along it as [p] reaches. */
+    fun stepAngle(anchor: Pt, p: Pt, stepDeg: Double): Pt {
+        val dx = p.x - anchor.x
+        val dy = p.y - anchor.y
+        if (dx == 0.0 && dy == 0.0) return p
+        val a = toRadians(roundHalfUp(toDegrees(atan2(dy, dx)) / stepDeg) * stepDeg)
+        // Rounded, so a quarter turn comes out exact and a flat line stays exactly flat.
+        val ux = cos(a).let { if (abs(it) < 1e-12) 0.0 else it }
+        val uy = sin(a).let { if (abs(it) < 1e-12) 0.0 else it }
+        val along = dx * ux + dy * uy
+        return Pt(anchor.x + ux * along, anchor.y + uy * along)
+    }
+
+    /** The far corner from [anchor] toward [p] of the smallest box [aspect] times as wide as tall that reaches [p]. */
+    fun aspectCorner(anchor: Pt, p: Pt, aspect: Double): Pt {
+        val h = max(abs(p.x - anchor.x) / aspect, abs(p.y - anchor.y))
+        val sx = if (p.x >= anchor.x) 1.0 else -1.0
+        val sy = if (p.y >= anchor.y) 1.0 else -1.0
+        return Pt(anchor.x + sx * h * aspect, anchor.y + sy * h)
     }
 
     /**

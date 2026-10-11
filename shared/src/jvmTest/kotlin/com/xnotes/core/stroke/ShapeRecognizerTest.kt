@@ -1,7 +1,7 @@
 package com.xnotes.core.stroke
 
 import com.xnotes.core.geometry.Pt
-import com.xnotes.core.tools.ShapeKind
+import com.xnotes.core.shapes.ShapeKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -24,11 +24,57 @@ class ShapeRecognizerTest {
     private fun circle(cx: Double, cy: Double, r: Double, n: Int, noise: Double): List<Pt> =
         ellipse(cx, cy, r, r, n, noise)
 
-    private fun ellipse(cx: Double, cy: Double, rx: Double, ry: Double, n: Int, noise: Double): List<Pt> =
+    private fun ellipse(cx: Double, cy: Double, rx: Double, ry: Double, n: Int, noise: Double, tiltDeg: Double = 0.0): List<Pt> =
         (0 until n).map { i ->
             val a = 2.0 * PI * i / n
-            Pt(cx + rx * cos(a) + jit(noise), cy + ry * sin(a) + jit(noise))
+            turned(cx, cy, rx * cos(a) + jit(noise), ry * sin(a) + jit(noise), tiltDeg)
         }
+
+    /** The point ([x], [y]) from the centre, turned [tiltDeg] about the centre ([cx], [cy]). */
+    private fun turned(cx: Double, cy: Double, x: Double, y: Double, tiltDeg: Double): Pt {
+        val rad = tiltDeg * PI / 180.0
+        return Pt(cx + x * cos(rad) - y * sin(rad), cy + x * sin(rad) + y * cos(rad))
+    }
+
+    /**
+     * A [w] by [h] capsule centred on ([cx], [cy]) and turned [tiltDeg], lapped from [start] (a share
+     * of the way round from its top left) and on for [extra] of a lap more (a gap when negative).
+     */
+    private fun capsule(
+        cx: Double,
+        cy: Double,
+        w: Double,
+        h: Double,
+        tiltDeg: Double = 0.0,
+        start: Double = 0.3,
+        extra: Double = 0.0,
+        noise: Double = 3.0,
+    ): List<Pt> {
+        val r = h / 2.0
+        val half = w / 2.0 - r
+        val side = 2.0 * half
+        val lap = 2.0 * side + 2.0 * PI * r
+        val out = ArrayList<Pt>()
+        var t = 0.0
+        while (t < lap * (1.0 + extra)) {
+            val u = (t + start * lap) % lap
+            val p = when {
+                u < side -> Pt(-half + u, -r)
+                u < side + PI * r -> (-PI / 2.0 + (u - side) / r).let { Pt(half + r * cos(it), r * sin(it)) }
+                u < 2.0 * side + PI * r -> Pt(half - (u - side - PI * r), r)
+                else -> (PI / 2.0 + (u - 2.0 * side - PI * r) / r).let { Pt(-half + r * cos(it), r * sin(it)) }
+            }
+            out.add(turned(cx, cy, p.x + jit(noise), p.y + jit(noise), tiltDeg))
+            t += 6.0
+        }
+        return out
+    }
+
+    private fun widthOf(rec: RecognizedShape) = abs(rec.end.x - rec.start.x)
+
+    private fun heightOf(rec: RecognizedShape) = abs(rec.end.y - rec.start.y)
+
+    private fun degrees(rad: Double) = rad * 180.0 / PI
 
     private fun line(a: Pt, b: Pt, n: Int, noise: Double): List<Pt> =
         (0 until n).map { i ->
@@ -256,7 +302,7 @@ class ShapeRecognizerTest {
         val rec = ShapeRecognizer.recognizePoints(c)
         assertNotNull(rec)
         assertEquals(ShapeKind.CURVE, rec!!.kind)
-        for (p in rec.vertices!!) assertEquals(r, hypot(p.x - cx, p.y - cy), 34.0)
+        for (p in CubicFit.sample(rec.controls!!, 32)) assertEquals(r, hypot(p.x - cx, p.y - cy), 34.0)
     }
 
     @Test fun clearOvalStaysEllipse() {
@@ -268,6 +314,102 @@ class ShapeRecognizerTest {
         assertEquals(400.0, w, 40.0)
         assertEquals(160.0, h, 40.0)
         assertTrue("a clear oval keeps its aspect", w - h > 100.0)
+    }
+
+    @Test fun capsuleSnapsToCapsule() {
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 200.0, 400.0, 80.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.CAPSULE, rec!!.kind)
+        assertEquals(0.0, rec.rotation, 0.0)
+        assertEquals(400.0, widthOf(rec), 16.0)
+        assertEquals(80.0, heightOf(rec), 12.0)
+        assertEquals(300.0, (rec.start.x + rec.end.x) / 2.0, 8.0)
+        assertEquals(200.0, (rec.start.y + rec.end.y) / 2.0, 8.0)
+    }
+
+    @Test fun tiltedCapsuleKeepsItsTurn() {
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 300.0, 360.0, 90.0, tiltDeg = 30.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.CAPSULE, rec!!.kind)
+        assertEquals(30.0, degrees(rec.rotation), 3.0)
+        assertEquals(360.0, widthOf(rec), 16.0)
+        assertEquals(90.0, heightOf(rec), 12.0)
+        assertEquals(300.0, (rec.start.x + rec.end.x) / 2.0, 8.0)
+        assertEquals(300.0, (rec.start.y + rec.end.y) / 2.0, 8.0)
+    }
+
+    @Test fun steepCapsuleStandsTallTurnedTheShortWay() {
+        // Lying 70° round is standing 20° back the other way, which keeps a label in it near upright.
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 300.0, 360.0, 90.0, tiltDeg = 70.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.CAPSULE, rec!!.kind)
+        assertEquals(-20.0, degrees(rec.rotation), 3.0)
+        assertEquals(90.0, widthOf(rec), 12.0)
+        assertEquals(360.0, heightOf(rec), 16.0)
+    }
+
+    @Test fun capsuleLappedPastItsStartIsStillOne() {
+        // Started on a round end and run on past it; counted twice, the overlap would throw the fit off.
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 300.0, 480.0, 70.0, tiltDeg = -25.0, start = 0.45, extra = 0.06))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.CAPSULE, rec!!.kind)
+        assertEquals(-25.0, degrees(rec.rotation), 3.0)
+        assertEquals(480.0, widthOf(rec), 20.0)
+    }
+
+    @Test fun nearlyUprightCapsuleIsSetUpright() {
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 200.0, 400.0, 80.0, tiltDeg = 5.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.CAPSULE, rec!!.kind)
+        assertEquals(0.0, rec.rotation, 0.0)
+        assertEquals(400.0, widthOf(rec), 16.0)
+    }
+
+    @Test fun tiltedOvalKeepsItsTurn() {
+        val rec = ShapeRecognizer.recognizePoints(ellipse(300.0, 300.0, 200.0, 70.0, 64, 3.0, tiltDeg = 35.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.ELLIPSE, rec!!.kind)
+        assertEquals(35.0, degrees(rec.rotation), 3.0)
+        assertEquals(400.0, widthOf(rec), 24.0)
+        assertEquals(140.0, heightOf(rec), 16.0)
+        assertEquals(300.0, (rec.start.x + rec.end.x) / 2.0, 8.0)
+        assertEquals(300.0, (rec.start.y + rec.end.y) / 2.0, 8.0)
+    }
+
+    @Test fun nearlyUprightThinOvalIsSetUpright() {
+        // Too thin and too turned for its bounds to read as an ellipse, but close enough to upright to set straight.
+        val rec = ShapeRecognizer.recognizePoints(ellipse(400.0, 200.0, 400.0, 40.0, 90, 3.0, tiltDeg = 6.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.ELLIPSE, rec!!.kind)
+        assertEquals(0.0, rec.rotation, 0.0)
+        assertEquals(800.0, widthOf(rec), 30.0)
+        assertEquals(80.0, heightOf(rec), 16.0)
+    }
+
+    @Test fun turnedNearCircleStaysACircle() {
+        val rec = ShapeRecognizer.recognizePoints(ellipse(200.0, 200.0, 150.0, 130.0, 56, 4.0, tiltDeg = 40.0))
+        assertNotNull(rec)
+        assertEquals(ShapeKind.ELLIPSE, rec!!.kind)
+        assertEquals(0.0, rec.rotation, 0.0)
+        assertEquals(widthOf(rec), heightOf(rec), 1e-9)
+    }
+
+    @Test fun ovalIsNeverACapsule() {
+        for (tilt in listOf(0.0, 30.0, 75.0)) {
+            for ((rx, ry) in listOf(120.0 to 60.0, 200.0 to 50.0, 320.0 to 40.0)) {
+                val rec = ShapeRecognizer.recognizePoints(ellipse(400.0, 400.0, rx, ry, 72, 3.0, tiltDeg = tilt))
+                assertEquals("oval $rx x $ry turned $tilt", ShapeKind.ELLIPSE, rec?.kind)
+            }
+        }
+    }
+
+    @Test fun aTurnedShapeKeepsItsTurn() {
+        val rec = ShapeRecognizer.recognizePoints(capsule(300.0, 300.0, 360.0, 90.0, tiltDeg = 30.0))!!
+        val shape = rec.toShape(com.xnotes.core.model.Rgba(0, 0, 0, 255), 3.0, null, false, 0.6, false, 10.0, 8.0)
+        assertEquals(ShapeKind.CAPSULE, shape.shape)
+        assertEquals(rec.rotation, shape.rotation, 0.0)
+        assertEquals(rec.start, shape.start)
+        assertEquals(rec.end, shape.end)
     }
 
     @Test fun nearCircleOvalSnapsToCircle() {
@@ -329,7 +471,7 @@ class ShapeRecognizerTest {
         val rec = ShapeRecognizer.recognizePoints(arc)
         assertNotNull(rec)
         assertEquals(ShapeKind.CURVE, rec!!.kind)
-        assertTrue(rec.vertices!!.size >= 4)
+        assertEquals("a curve is kept as its four control points", 4, rec.controls!!.size)
     }
 
     @Test fun sCurveSnapsToCurve() {
@@ -342,8 +484,8 @@ class ShapeRecognizerTest {
         assertNotNull(rec)
         assertEquals(ShapeKind.CURVE, rec!!.kind)
         // The fit keeps the stroke's endpoints.
-        assertEquals(s.first().x, rec.vertices!!.first().x, 18.0)
-        assertEquals(s.last().x, rec.vertices!!.last().x, 18.0)
+        assertEquals(s.first().x, rec.controls!!.first().x, 18.0)
+        assertEquals(s.last().x, rec.controls!!.last().x, 18.0)
     }
 
     // --- properties ---

@@ -6,10 +6,16 @@ import com.xnotes.core.geometry.Obb
 import com.xnotes.core.geometry.Pt
 import com.xnotes.core.geometry.Rect
 import com.xnotes.core.model.ImageItem
+import com.xnotes.core.model.Rgba
+import com.xnotes.core.model.ShapeItem
 import com.xnotes.core.model.TextItem
+import com.xnotes.core.shapes.ArrowKinds
+import com.xnotes.core.shapes.ShapeKind
+import com.xnotes.core.shapes.ShapeParams
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.atan2
 
 class ResizeMathTest {
 
@@ -158,5 +164,53 @@ class ResizeMathTest {
             assertEquals(newC.x, t.x, 1e-6)
             assertEquals(newC.y, t.y, 1e-6)
         }
+    }
+
+    private fun drawing(kind: ShapeKind, n: Int = kind.defaultN) =
+        ShapeItem(kind, Pt(10.0, 20.0), Pt(10.0, 20.0), Rgba(0, 0, 0), n = n)
+
+    @Test fun perfectSquaresABox() {
+        for (k in listOf(ShapeKind.RECTANGLE, ShapeKind.ELLIPSE, ShapeKind.ROUNDED_RECT, ShapeKind.HEART)) {
+            val s = drawing(k)
+            assertEquals("$k free", Pt(110.0, 60.0), ResizeMath.drawnEnd(s, Pt(110.0, 60.0), perfect = false))
+            assertEquals("$k square, reaching the pen", Pt(110.0, 120.0), ResizeMath.drawnEnd(s, Pt(110.0, 60.0), perfect = true))
+            assertEquals("$k up and left of its start", Pt(-70.0, -60.0), ResizeMath.drawnEnd(s, Pt(-30.0, -60.0), perfect = true))
+        }
+        assertEquals("a circle is round without one", Pt(110.0, 120.0), ResizeMath.drawnEnd(drawing(ShapeKind.CIRCLE), Pt(110.0, 60.0), perfect = false))
+    }
+
+    @Test fun perfectKeepsALineToFifteenDegreeSteps() {
+        for (k in listOf(ShapeKind.LINE, ShapeKind.ARROW)) {
+            val s = drawing(k)
+            val end = ResizeMath.drawnEnd(s, Pt(110.0, 50.0), perfect = true)
+            assertEquals("$k at 17 degrees goes to 15", 15.0, Math.toDegrees(atan2(end.y - 20.0, end.x - 10.0)), 1e-9)
+            assertEquals("$k flat stays exactly flat", 20.0, ResizeMath.drawnEnd(s, Pt(110.0, 26.0), perfect = true).y, 0.0)
+            assertEquals("$k upright stays exactly upright", 10.0, ResizeMath.drawnEnd(s, Pt(16.0, -80.0), perfect = true).x, 0.0)
+            assertEquals("$k free", Pt(110.0, 50.0), ResizeMath.drawnEnd(s, Pt(110.0, 50.0), perfect = false))
+        }
+    }
+
+    @Test fun perfectMakesPolygonsStarsAndTrianglesRegular() {
+        fun sides(k: ShapeKind, n: Int): List<Double> {
+            val s = drawing(k, n)
+            s.end = ResizeMath.drawnEnd(s, Pt(130.0, 70.0), perfect = true)
+            val c = k.build(s.box, ShapeParams(k.defaultAdj, n)).corners
+            return c.indices.map { c[it].distanceTo(c[(it + 1) % c.size]) }
+        }
+        for (n in 3..12) {
+            val polygon = sides(ShapeKind.REGULAR_POLYGON, n)
+            for (d in polygon) assertEquals("$n sides", polygon[0], d, 1e-9)
+            val star = sides(ShapeKind.STAR, n)
+            for (d in star) assertEquals("$n points", star[0], d, 1e-9)
+        }
+        val triangle = sides(ShapeKind.TRIANGLE, 0)
+        for (d in triangle) assertEquals("equilateral", triangle[0], d, 1e-9)
+    }
+
+    @Test fun perfectKeepsPillsAndDoubleArrowsLong() {
+        for (k in listOf(ShapeKind.CAPSULE, ArrowKinds.LEFT_RIGHT)) {
+            assertEquals("$k twice as wide as tall", Pt(210.0, 120.0), ResizeMath.drawnEnd(drawing(k), Pt(110.0, 120.0), perfect = true))
+        }
+        assertEquals("twice as tall as wide", Pt(110.0, 220.0), ResizeMath.drawnEnd(drawing(ArrowKinds.UP_DOWN), Pt(110.0, 120.0), perfect = true))
     }
 }

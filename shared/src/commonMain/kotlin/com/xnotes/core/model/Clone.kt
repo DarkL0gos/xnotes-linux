@@ -1,5 +1,6 @@
 package com.xnotes.core.model
 
+import com.xnotes.core.platform.identityMap
 import com.xnotes.core.pal.TextMeasurer
 
 /**
@@ -13,15 +14,45 @@ fun CanvasItem.deepCopy(measurer: TextMeasurer): CanvasItem = when (this) {
     is ImageItem -> ImageItem(image, rect, orientation, angle)
     is TextItem -> TextItem(pos, width, height, text, rgba, pointSize, face, measurer)
     is ShapeItem ->
-        ShapeItem(shape, start, end, strokeRgba, strokeWidth, fillRgba, neon, neonStrength, points?.toList(), dashed, dashLength, dashGap)
+        ShapeItem(
+            shape, start, end, strokeRgba, strokeWidth, fillRgba, neon, neonStrength, path,
+            dashed, dashLength, dashGap, rotation, adj.copyOf(), n, headStart, headEnd,
+        ).also {
+            it.label = label
+            it.labelAt = labelAt
+        }
+    is ConnectorItem ->
+        ConnectorItem(routing, start, end, strokeRgba, strokeWidth, headStart, headEnd, dashed, dashLength, dashGap, neon, neonStrength).also {
+            it.waypoints = waypoints
+            it.elbow = elbow
+            it.label = label
+            it.labelAt = labelAt
+        }
     else -> this
     // Carried, not reset: autosave snapshots the document through this, so dropping the lock here
     // would quietly unlock everything on the next save.
 }.also { it.locked = locked }
 
-/** A deep copy of a page — its items cloned ([deepCopy]) — keeping the size, PDF link, style and margins. */
+/**
+ * Deep copies of these items that keep their joins among themselves: a connector copied with what it
+ * joins joins the copies, and an end glued to anything left behind goes loose where it was. A lone
+ * [deepCopy] of a connector keeps its glue to the originals.
+ */
+fun List<CanvasItem>.deepCopyAll(measurer: TextMeasurer): List<CanvasItem> {
+    val copies = identityMap<CanvasItem, CanvasItem>(size * 2)
+    val out = map { item -> item.deepCopy(measurer).also { copies[item] = it } }
+    fun regluedTo(e: ConnectorEnd): ConnectorEnd = e.target?.let { t -> copies[t]?.let { ConnectorEnd(e.at, it, e.point) } } ?: e.loose()
+    for (c in out) {
+        if (c !is ConnectorItem) continue
+        c.start = regluedTo(c.start)
+        c.end = regluedTo(c.end)
+    }
+    return out
+}
+
+/** A deep copy of a page — its items cloned ([deepCopyAll]) — keeping the size, PDF link, style, margins and markups. */
 fun Page.deepCopy(measurer: TextMeasurer): Page =
-    Page(width, height, items.mapTo(mutableListOf()) { it.deepCopy(measurer) }, pdfPage, style, margins)
+    Page(width, height, items.deepCopyAll(measurer).toMutableList(), pdfPage, style, margins, markups)
 
 /**
  * A deep copy of a document: pages cloned, bookmarks copied, the source PDF file and styles shared
@@ -42,6 +73,7 @@ fun Document.deepCopy(measurer: TextMeasurer): Document = Document(
     // The flow must be cloned too or the autosave snapshot would race live edits.
     flow = flow.deepCopy(),
     created = created,
+    templates = templates,
 )
 
 /**
@@ -60,7 +92,7 @@ fun Document.deepCopy(measurer: TextMeasurer): Document = Document(
  */
 fun Document.snapshot(): Document = Document(
     pages = pages.mapTo(mutableListOf()) {
-        Page(it.width, it.height, ArrayList(it.items), it.pdfPage, it.style, it.margins)
+        Page(it.width, it.height, ArrayList(it.items), it.pdfPage, it.style, it.margins, it.markups)
     },
     dpi = dpi,
     path = path,
@@ -72,4 +104,5 @@ fun Document.snapshot(): Document = Document(
     margins = margins,
     flow = flow.deepCopy(),
     created = created,
+    templates = templates,
 )

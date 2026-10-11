@@ -61,8 +61,8 @@ interface CanvasItem {
 
     /**
      * Bake an affine (a selection scale or rotation, page-local) into the item's geometry.
-     * Rotating a box-parametric shape converts it to a polygon/polyline; strokes and shapes
-     * scale their line width by the transform's linear factor; images and text never rotate.
+     * Rotating a box-parametric shape converts it to a polygon/polyline; strokes scale their line
+     * width by the transform's linear factor while shapes keep theirs; images and text never rotate.
      */
     fun applyTransform(t: Affine)
 }
